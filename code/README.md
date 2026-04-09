@@ -13,8 +13,11 @@
 
 ```bash
 cd code
-python3 -m venv .venv
-source .venv/bin/activate
+# 创建conda环境（Python3，环境名diffusion）
+conda create -n diffusion python=3.10 -y
+# 激活环境
+conda activate diffusion
+# 安装依赖
 pip install -r requirements.txt
 ```
 
