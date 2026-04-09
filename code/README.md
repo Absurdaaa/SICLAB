@@ -6,6 +6,7 @@
 
 - `train.py`：训练入口。
 - `sample.py`：从训练好的 checkpoint 采样并导出图片网格。
+- `show_dataset.py`：导出数据集样本网格图，快速检查数据是否正常。
 - `train_config.json`：训练配置。
 - `ddpm_cifar/`：模型、扩散过程、数据集和工具函数。
 
@@ -44,6 +45,19 @@ python3 train.py --config train_config.json
 cd code
 python3 sample.py --checkpoint outputs/checkpoints/checkpoint_epoch_0005.pt --output outputs/sample.png
 ```
+
+## 查看数据集
+
+```bash
+cd code
+python3 show_dataset.py --num-images 16 --output outputs/dataset_preview.png
+```
+
+这个脚本会：
+
+- 读取 `../data/cifar-10-batches-py`
+- 打印数据集大小、单张图片 shape、数值范围
+- 保存一个样本拼图到 `outputs/dataset_preview.png`
 
 ## 可调整项
 
