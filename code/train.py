@@ -15,7 +15,14 @@ from ddpm_cifar.config import TrainConfig
 from ddpm_cifar.dataset import CIFAR10BatchDataset
 from ddpm_cifar.diffusion import GaussianDiffusion
 from ddpm_cifar.model import UNet
-from ddpm_cifar.utils import ensure_dir, get_device, save_image_grid, set_seed, update_ema
+from ddpm_cifar.utils import (
+    ensure_dir,
+    get_device,
+    save_image_grid,
+    set_seed,
+    unwrap_model,
+    update_ema,
+)
 
 
 def build_diffusion(config: TrainConfig) -> tuple[GaussianDiffusion, GaussianDiffusion]:
@@ -40,10 +47,12 @@ def save_checkpoint(
     optimizer: AdamW,
     config: TrainConfig,
 ) -> None:
+    train_model = unwrap_model(diffusion.model)
+    ema_model = unwrap_model(ema_diffusion.model)
     checkpoint = {
         "epoch": epoch,
-        "model": diffusion.model.state_dict(),
-        "ema_model": ema_diffusion.model.state_dict(),
+        "model": train_model.state_dict(),
+        "ema_model": ema_model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "config": config.to_dict(),
     }
@@ -73,10 +82,15 @@ def train(config: TrainConfig) -> None:
     diffusion, ema_diffusion = build_diffusion(config)
     diffusion = diffusion.to(device)
     ema_diffusion = ema_diffusion.to(device)
+
+    if config.use_data_parallel and device.type == "cuda" and torch.cuda.device_count() > 1:
+        diffusion.model = torch.nn.DataParallel(diffusion.model)
+        print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
+
     ema_diffusion.eval()
 
     optimizer = AdamW(
-        diffusion.model.parameters(),
+        unwrap_model(diffusion.model).parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
@@ -93,7 +107,7 @@ def train(config: TrainConfig) -> None:
             optimizer.zero_grad(set_to_none=True)
             loss = diffusion.p_losses(batch, timesteps)
             loss.backward()
-            clip_grad_norm_(diffusion.model.parameters(), config.grad_clip)
+            clip_grad_norm_(unwrap_model(diffusion.model).parameters(), config.grad_clip)
             optimizer.step()
             update_ema(ema_diffusion.model, diffusion.model, config.ema_decay)
 

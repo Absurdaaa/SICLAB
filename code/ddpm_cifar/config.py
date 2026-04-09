@@ -30,6 +30,7 @@ class TrainConfig:
     num_sample_images: int = 16
     seed: int = 42
     device: str = "auto"
+    use_data_parallel: bool = True
 
     @classmethod
     def from_json(cls, path: str | Path) -> "TrainConfig":

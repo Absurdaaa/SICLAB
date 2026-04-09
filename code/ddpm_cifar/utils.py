@@ -32,8 +32,14 @@ def ensure_dir(path: str | Path) -> Path:
     return output
 
 
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    return model.module if isinstance(model, torch.nn.DataParallel) else model
+
+
 @torch.no_grad()
 def update_ema(ema_model: torch.nn.Module, model: torch.nn.Module, decay: float) -> None:
+    ema_model = unwrap_model(ema_model)
+    model = unwrap_model(model)
     ema_params = dict(ema_model.named_parameters())
     model_params = dict(model.named_parameters())
     for name, param in model_params.items():
