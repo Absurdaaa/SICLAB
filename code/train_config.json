@@ -21,5 +21,6 @@
   "sample_every": 5,
   "num_sample_images": 16,
   "seed": 42,
-  "device": "auto"
+  "device": "auto",
+  "use_data_parallel": true
 }

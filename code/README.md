@@ -20,6 +20,8 @@ pip install -r requirements.txt
 
 你的机器没有 GPU 也可以训练，只是会比较慢。默认 `device` 是 `auto`，没有 CUDA 时会自动回退到 CPU。
 
+如果你有多张 GPU，默认会在单机上自动启用 `DataParallel`。当前这套代码会把一个 batch 拆到多卡上并行训练。
+
 ## 训练
 
 ```bash
@@ -45,3 +47,5 @@ python3 sample.py --checkpoint outputs/checkpoints/checkpoint_epoch_0005.pt --ou
 - 如果 CPU 太慢，先把 `timesteps` 改小，比如 `200` 或 `500`。
 - 可以把 `base_channels` 从 `64` 降到 `32`，把 `batch_size` 从 `64` 降到 `16` 或 `32`。
 - `num_workers` 在 macOS 上先保持 `0`，更稳。
+- 如果使用双卡或多卡，建议适当增大 `batch_size`，比如从 `64` 提到 `128` 或 `256`，不然加速不会太明显。
+- 如果你想临时关闭多卡，把 `train_config.json` 里的 `use_data_parallel` 改成 `false`。
