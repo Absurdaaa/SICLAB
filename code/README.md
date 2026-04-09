@@ -6,6 +6,10 @@
 
 - `train.py`：训练入口。
 - `sample.py`：从训练好的 checkpoint 采样并导出图片网格。
+- `show_dataset.py`：导出数据集样本网格图，快速检查数据是否正常。
+- `export_real_images.py`：导出 CIFAR-10 真实图片目录，供 FID/IS 使用。
+- `generate_eval_images.py`：批量生成图片目录，供 FID/IS 使用。
+- `eval_metrics.py`：计算 `FID` 和 `Inception Score`。
 - `train_config.json`：训练配置。
 - `ddpm_cifar/`：模型、扩散过程、数据集和工具函数。
 
@@ -44,6 +48,57 @@ python3 train.py --config train_config.json
 cd code
 python3 sample.py --checkpoint outputs/checkpoints/checkpoint_epoch_0005.pt --output outputs/sample.png
 ```
+
+## 查看数据集
+
+```bash
+cd code
+python3 show_dataset.py --num-images 16 --output outputs/dataset_preview.png
+```
+
+这个脚本会：
+
+- 读取 `../data/cifar-10-batches-py`
+- 打印数据集大小、单张图片 shape、数值范围
+- 保存一个样本拼图到 `outputs/dataset_preview.png`
+
+## 评估 FID / IS
+
+先导出真实图片目录，默认导出 `test_batch`：
+
+```bash
+cd code
+python3 export_real_images.py --split test --output-dir outputs/real_test_images
+```
+
+再从训练好的 checkpoint 批量生成图片：
+
+```bash
+cd code
+python3 generate_eval_images.py \
+  --checkpoint outputs/checkpoints/checkpoint_epoch_0010.pt \
+  --output-dir outputs/generated_eval_images \
+  --num-images 10000 \
+  --batch-size 100
+```
+
+最后计算指标：
+
+```bash
+cd code
+python3 eval_metrics.py \
+  --real-dir outputs/real_test_images \
+  --generated-dir outputs/generated_eval_images \
+  --batch-size 64 \
+  --device cuda:0
+```
+
+说明：
+
+- `FID` 越低越好。
+- `Inception Score` 越高越好。
+- 更建议把 `test_batch` 作为真实集口径固定下来。
+- 如果只想算 `FID`，加 `--no-isc`。
 
 ## 可调整项
 
