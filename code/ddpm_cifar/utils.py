@@ -67,3 +67,13 @@ def save_image_grid(images: torch.Tensor, path: str | Path, nrow: int | None = N
 
     array = grid.permute(1, 2, 0).numpy()
     Image.fromarray(array).save(path)
+
+
+def tensor_to_uint8_image(image: torch.Tensor) -> np.ndarray:
+    image = image.detach().cpu().clamp(-1.0, 1.0)
+    image = ((image + 1.0) * 127.5).to(torch.uint8)
+    return image.permute(1, 2, 0).numpy()
+
+
+def save_single_image(image: torch.Tensor, path: str | Path) -> None:
+    Image.fromarray(tensor_to_uint8_image(image)).save(path)
