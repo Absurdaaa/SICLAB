@@ -22,10 +22,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    real_dir = Path(args.real_dir)
+    generated_dir = Path(args.generated_dir)
+
+    if not real_dir.is_dir():
+        raise FileNotFoundError(f"Real image directory not found: {real_dir}")
+    if not generated_dir.is_dir():
+        raise FileNotFoundError(f"Generated image directory not found: {generated_dir}")
 
     metrics = calculate_metrics(
-        input1=Path(args.generated_dir),
-        input2=Path(args.real_dir),
+        input1=str(generated_dir),
+        input2=str(real_dir),
         cuda=args.device.startswith("cuda"),
         isc=not args.no_isc,
         fid=True,

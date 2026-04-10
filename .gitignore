@@ -1,3 +1,6 @@
 data/
 .DS_Store
 code/outputs/
+weight/
+/code/ddpm_cifar/__pycache__/
+/code/__pycache__/
