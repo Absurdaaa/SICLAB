@@ -92,6 +92,19 @@ python3 generate_eval_images.py \
   --batch-size 100
 ```
 
+如果你要用单机多卡并行生成，例如 4 卡：
+
+```bash
+cd code
+torchrun --standalone --nproc_per_node=4 generate_eval_images.py \
+  --checkpoint outputs/checkpoints/checkpoint_epoch_0010.pt \
+  --output-dir outputs/generated_eval_images \
+  --num-images 50000 \
+  --batch-size 100
+```
+
+这里的 `--batch-size` 是每个进程各自的采样 batch size，不是全局 batch size。
+
 最后计算指标：
 
 ```bash
