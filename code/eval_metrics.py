@@ -38,6 +38,7 @@ def main() -> None:
         fid=True,
         batch_size=args.batch_size,
         device=args.device,
+        samples_find_deep=True,
     )
 
     for key, value in metrics.items():
