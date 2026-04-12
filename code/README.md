@@ -12,8 +12,22 @@
 - `export_real_images.py`：导出 CIFAR-10 真实图片目录，供 FID/IS 使用。
 - `generate_eval_images.py`：批量生成图片目录，供 FID/IS 使用。
 - `eval_metrics.py`：计算 `FID` 和 `Inception Score`。
+- `train_distill.py`：从已训练好的 diffusion teacher 蒸馏一步生成器。
+- `sample_distill.py`：从蒸馏后的一步生成器采样。
+- `distill_config.json`：一步蒸馏配置。
 - `train_config.json`：训练配置。
 - `ddpm_cifar/`：模型、扩散过程、数据集和工具函数。
+
+说明：
+
+- `ddpm_cifar/` 现在只保留 diffusion 训练和采样相关代码
+- 蒸馏相关代码统一放在 `dmd_cifar/`：
+  - `dmd_cifar/config.py`
+  - `dmd_cifar/student.py`
+  - `dmd_cifar/loss.py`
+  - `dmd_cifar/train.py`
+  - `dmd_cifar/sample.py`
+- 顶层的 `train_distill.py` 和 `sample_distill.py` 只是薄封装，默认从 `dmd_cifar/` 启动。
 
 ## 环境
 
@@ -122,6 +136,46 @@ python3 eval_metrics.py \
 - `Inception Score` 越高越好。
 - 更建议把 `test_batch` 作为真实集口径固定下来。
 - 如果只想算 `FID`，加 `--no-isc`。
+
+## 一步蒸馏
+
+这套代码还额外提供了一版基于当前 teacher checkpoint 的像素级一步蒸馏骨架。它不是完整复刻 `dmd` 仓库，而是直接利用本项目已经训练好的 diffusion 模型做 teacher。
+
+先确保你已经有 teacher checkpoint，例如：
+
+```bash
+code/outputs/checkpoints/checkpoint_epoch_0300.pt
+```
+
+训练一步生成器：
+
+```bash
+cd code
+python3 train_distill.py --config distill_config.json
+```
+
+单机 4 卡：
+
+```bash
+cd code
+torchrun --standalone --nproc_per_node=4 train_distill.py --config distill_config.json
+```
+
+采样：
+
+```bash
+cd code
+python3 sample_distill.py \
+  --checkpoint distill_outputs/checkpoints/distill_epoch_0100.pt \
+  --output distill_outputs/sample.png
+```
+
+这版蒸馏的基本思路是：
+
+- student 从随机噪声一步生成图像
+- 对 student 图像重新加噪
+- 用 teacher 预测噪声并反推出 `x0`
+- 用 teacher 反推得到的 `x0` 去约束 student 输出
 
 ## 可调整项
 
