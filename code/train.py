@@ -3,13 +3,23 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
+
+try:
+    from torch.amp import GradScaler, autocast
+    HAS_TORCH_AMP = True
+except ImportError:
+    from torch.cuda.amp import GradScaler, autocast
+    HAS_TORCH_AMP = False
 
 from ddpm_cifar.config import TrainConfig
 from ddpm_cifar.dataset import CIFAR10BatchDataset
@@ -32,6 +42,8 @@ def build_diffusion(config: TrainConfig) -> tuple[GaussianDiffusion, GaussianDif
         channel_multipliers=config.channel_multipliers,
         num_res_blocks=config.num_res_blocks,
         time_emb_dim=config.time_emb_dim,
+        dropout=config.dropout,
+        attention_levels=config.attention_levels,
     )
     ema_model = copy.deepcopy(model)
     diffusion = GaussianDiffusion(model, config.timesteps, config.beta_start, config.beta_end)
@@ -59,21 +71,73 @@ def save_checkpoint(
     torch.save(checkpoint, output_dir / f"checkpoint_epoch_{epoch:04d}.pt")
 
 
-def train(config: TrainConfig) -> None:
-    set_seed(config.seed)
-    device = get_device(config.device)
-    output_dir = ensure_dir(config.output_dir)
-    ensure_dir(output_dir / "samples")
-    ensure_dir(output_dir / "checkpoints")
+def is_distributed() -> bool:
+    return dist.is_available() and dist.is_initialized()
 
-    with open(output_dir / "config.json", "w", encoding="utf-8") as f:
-        json.dump(config.to_dict(), f, indent=2)
+
+def get_rank() -> int:
+    return dist.get_rank() if is_distributed() else 0
+
+
+def is_main_process() -> bool:
+    return get_rank() == 0
+
+
+def setup_distributed(config: TrainConfig) -> tuple[torch.device, int]:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
+    if config.use_ddp and world_size > 1:
+        if not torch.cuda.is_available():
+            raise RuntimeError("DDP launch detected but CUDA is not available.")
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend="nccl")
+        device = torch.device("cuda", local_rank)
+        return device, world_size
+
+    return get_device(config.device), 1
+
+
+def cleanup_distributed() -> None:
+    if is_distributed():
+        dist.destroy_process_group()
+
+
+def autocast_context(device: torch.device, enabled: bool):
+    if not enabled:
+        return autocast(enabled=False)
+    if HAS_TORCH_AMP:
+        return autocast(device_type=device.type, enabled=True)
+    return autocast(enabled=True)
+
+
+def make_grad_scaler(enabled: bool):
+    if HAS_TORCH_AMP:
+        return GradScaler("cuda", enabled=enabled)
+    return GradScaler(enabled=enabled)
+
+
+def train(config: TrainConfig) -> None:
+    device, world_size = setup_distributed(config)
+    set_seed(config.seed + get_rank())
+
+    output_dir = Path(config.output_dir)
+    if is_main_process():
+        ensure_dir(output_dir)
+        ensure_dir(output_dir / "samples")
+        ensure_dir(output_dir / "checkpoints")
+        with open(output_dir / "config.json", "w", encoding="utf-8") as f:
+            json.dump(config.to_dict(), f, indent=2)
+    if is_distributed():
+        dist.barrier()
 
     dataset = CIFAR10BatchDataset(config.data_dir)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=get_rank(), shuffle=True) if world_size > 1 else None
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=config.num_workers,
         pin_memory=(device.type == "cuda"),
         drop_last=True,
@@ -83,9 +147,10 @@ def train(config: TrainConfig) -> None:
     diffusion = diffusion.to(device)
     ema_diffusion = ema_diffusion.to(device)
 
-    if config.use_data_parallel and device.type == "cuda" and torch.cuda.device_count() > 1:
-        diffusion.model = torch.nn.DataParallel(diffusion.model)
-        print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
+    if world_size > 1:
+        diffusion.model = DDP(diffusion.model, device_ids=[device.index], output_device=device.index)
+        if is_main_process():
+            print(f"Using DDP on {world_size} GPUs")
 
     ema_diffusion.eval()
 
@@ -94,30 +159,46 @@ def train(config: TrainConfig) -> None:
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
+    scaler = make_grad_scaler(enabled=(config.use_amp and device.type == "cuda"))
 
     for epoch in range(1, config.epochs + 1):
+        if sampler is not None:
+            sampler.set_epoch(epoch)
         diffusion.train()
         running_loss = 0.0
 
-        progress = tqdm(dataloader, desc=f"Epoch {epoch}/{config.epochs}", leave=False)
+        progress = tqdm(
+            dataloader,
+            desc=f"Epoch {epoch}/{config.epochs}",
+            leave=False,
+            disable=not is_main_process(),
+        )
         for batch in progress:
-            batch = batch.to(device)
+            batch = batch.to(device, non_blocking=True)
             timesteps = torch.randint(0, config.timesteps, (batch.shape[0],), device=device)
 
             optimizer.zero_grad(set_to_none=True)
-            loss = diffusion.p_losses(batch, timesteps)
-            loss.backward()
+            with autocast_context(device, enabled=(config.use_amp and device.type == "cuda")):
+                loss = diffusion.p_losses(batch, timesteps)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             clip_grad_norm_(unwrap_model(diffusion.model).parameters(), config.grad_clip)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             update_ema(ema_diffusion.model, diffusion.model, config.ema_decay)
 
             running_loss += loss.item()
-            progress.set_postfix(loss=f"{loss.item():.4f}")
+            if is_main_process():
+                progress.set_postfix(loss=f"{loss.item():.4f}")
 
-        epoch_loss = running_loss / len(dataloader)
-        print(f"epoch={epoch} loss={epoch_loss:.6f}")
+        epoch_loss = torch.tensor(running_loss / len(dataloader), device=device)
+        if is_distributed():
+            dist.all_reduce(epoch_loss, op=dist.ReduceOp.SUM)
+            epoch_loss /= world_size
+        if is_main_process():
+            print(f"epoch={epoch} loss={epoch_loss.item():.6f}")
 
-        if epoch % config.sample_every == 0:
+        if is_main_process() and epoch % config.sample_every == 0:
             ema_diffusion.eval()
             samples = ema_diffusion.sample(
                 num_samples=config.num_sample_images,
@@ -127,8 +208,10 @@ def train(config: TrainConfig) -> None:
             )
             save_image_grid(samples, output_dir / "samples" / f"epoch_{epoch:04d}.png")
 
-        if epoch % config.save_every == 0:
+        if is_main_process() and epoch % config.save_every == 0:
             save_checkpoint(output_dir / "checkpoints", epoch, diffusion, ema_diffusion, optimizer, config)
+
+    cleanup_distributed()
 
 
 def parse_args() -> argparse.Namespace:

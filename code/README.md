@@ -2,6 +2,8 @@
 
 这个目录提供了一个基于 PyTorch 的最小 DDPM 训练骨架，直接读取 `../data/cifar-10-batches-py` 下的 CIFAR-10 官方 Python 批文件。
 
+当前默认配置已经向 EDM 的 CIFAR-10 设置靠拢了一步：更宽的 UNet、更深的残差块、低分辨率 attention、更小的学习率，以及默认开启 AMP，适合多卡 NVIDIA GPU。
+
 ## 目录
 
 - `train.py`：训练入口。
@@ -27,13 +29,21 @@ pip install -r requirements.txt
 
 你的机器没有 GPU 也可以训练，只是会比较慢。默认 `device` 是 `auto`，没有 CUDA 时会自动回退到 CPU。
 
-如果你有多张 GPU，默认会在单机上自动启用 `DataParallel`。当前这套代码会把一个 batch 拆到多卡上并行训练。
+如果你有多张 GPU，默认优先走单机 `DDP`。推荐用 `torchrun` 启动，每张卡一个进程，效率比 `DataParallel` 更高。
+如果你有 4 张 3090，建议直接从当前默认配置开始跑，再根据显存把 `batch_size` 调到 `256` 或 `512`。
 
 ## 训练
 
 ```bash
 cd code
 python3 train.py --config train_config.json
+```
+
+单机 4 卡推荐这样启动：
+
+```bash
+cd code
+torchrun --standalone --nproc_per_node=4 train.py --config train_config.json
 ```
 
 训练输出会写到 `code/outputs/`：
@@ -103,7 +113,8 @@ python3 eval_metrics.py \
 ## 可调整项
 
 - 如果 CPU 太慢，先把 `timesteps` 改小，比如 `200` 或 `500`。
-- 可以把 `base_channels` 从 `64` 降到 `32`，把 `batch_size` 从 `64` 降到 `16` 或 `32`。
-- `num_workers` 在 macOS 上先保持 `0`，更稳。
+- 如果显存不足，先把 `base_channels` 从 `128` 降到 `96` 或 `64`，再把 `batch_size` 下调。
+- `attention_levels=[1, 2]` 表示在更低分辨率层启用 attention，这比全层 attention 更稳，也更接近 CIFAR-10 上常见配置。
+- Linux 多卡环境下可以把 `num_workers` 调到 `8` 或 `16`；macOS 上先保持 `0` 更稳。
 - 如果使用双卡或多卡，建议适当增大 `batch_size`，比如从 `64` 提到 `128` 或 `256`，不然加速不会太明显。
-- 如果你想临时关闭多卡，把 `train_config.json` 里的 `use_data_parallel` 改成 `false`。
+- 如果你想临时关闭 DDP，用普通方式直接跑 `python3 train.py --config train_config.json`，或者把 `train_config.json` 里的 `use_ddp` 改成 `false`。

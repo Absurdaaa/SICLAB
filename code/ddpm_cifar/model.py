@@ -7,6 +7,13 @@ from torch import nn
 import torch.nn.functional as F
 
 
+def group_count(num_channels: int, max_groups: int = 32) -> int:
+    groups = min(max_groups, num_channels)
+    while groups > 1 and num_channels % groups != 0:
+        groups -= 1
+    return groups
+
+
 class SinusoidalTimeEmbedding(nn.Module):
     def __init__(self, dim: int) -> None:
         super().__init__()
@@ -24,12 +31,19 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, time_emb_dim: int) -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        time_emb_dim: int,
+        dropout: float = 0.0,
+    ) -> None:
         super().__init__()
-        self.norm1 = nn.GroupNorm(8, in_channels)
+        self.norm1 = nn.GroupNorm(group_count(in_channels), in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
         self.time_proj = nn.Linear(time_emb_dim, out_channels)
-        self.norm2 = nn.GroupNorm(8, out_channels)
+        self.norm2 = nn.GroupNorm(group_count(out_channels), out_channels)
+        self.dropout = nn.Dropout(dropout)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
         self.skip = (
             nn.Conv2d(in_channels, out_channels, kernel_size=1)
@@ -40,8 +54,33 @@ class ResBlock(nn.Module):
     def forward(self, x: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:
         h = self.conv1(F.silu(self.norm1(x)))
         h = h + self.time_proj(F.silu(time_emb))[:, :, None, None]
-        h = self.conv2(F.silu(self.norm2(h)))
+        h = self.conv2(self.dropout(F.silu(self.norm2(h))))
         return h + self.skip(x)
+
+
+class AttentionBlock(nn.Module):
+    def __init__(self, channels: int, num_heads: int = 4) -> None:
+        super().__init__()
+        self.norm = nn.GroupNorm(group_count(channels), channels)
+        self.qkv = nn.Conv1d(channels, channels * 3, kernel_size=1)
+        self.proj = nn.Conv1d(channels, channels, kernel_size=1)
+        self.num_heads = num_heads
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.shape
+        residual = x
+        x = self.norm(x).reshape(b, c, h * w)
+        q, k, v = self.qkv(x).chunk(3, dim=1)
+
+        head_dim = c // self.num_heads
+        q = q.reshape(b, self.num_heads, head_dim, h * w)
+        k = k.reshape(b, self.num_heads, head_dim, h * w)
+        v = v.reshape(b, self.num_heads, head_dim, h * w)
+
+        attn = torch.softmax(torch.einsum("bncd,bnce->bnde", q, k) / math.sqrt(head_dim), dim=-1)
+        out = torch.einsum("bnde,bnce->bncd", attn, v).reshape(b, c, h * w)
+        out = self.proj(out).reshape(b, c, h, w)
+        return out + residual
 
 
 class Downsample(nn.Module):
@@ -67,10 +106,12 @@ class UNet(nn.Module):
     def __init__(
         self,
         in_channels: int = 3,
-        base_channels: int = 64,
-        channel_multipliers: tuple[int, ...] = (1, 2, 4),
-        num_res_blocks: int = 2,
-        time_emb_dim: int = 256,
+        base_channels: int = 128,
+        channel_multipliers: tuple[int, ...] = (2, 2, 2),
+        num_res_blocks: int = 4,
+        time_emb_dim: int = 512,
+        dropout: float = 0.0,
+        attention_levels: tuple[int, ...] = (1, 2),
     ) -> None:
         super().__init__()
         self.time_mlp = nn.Sequential(
@@ -91,7 +132,12 @@ class UNet(nn.Module):
             out_channels = base_channels * mult
             level_blocks = nn.ModuleList()
             for _ in range(num_res_blocks):
-                block = ResBlock(current_channels, out_channels, time_emb_dim)
+                block = nn.ModuleList(
+                    [
+                        ResBlock(current_channels, out_channels, time_emb_dim, dropout=dropout),
+                        AttentionBlock(out_channels) if level in attention_levels else nn.Identity(),
+                    ]
+                )
                 level_blocks.append(block)
                 current_channels = out_channels
                 channels.append(current_channels)
@@ -100,8 +146,9 @@ class UNet(nn.Module):
                 self.downsamples.append(Downsample(current_channels))
                 channels.append(current_channels)
 
-        self.mid_block1 = ResBlock(current_channels, current_channels, time_emb_dim)
-        self.mid_block2 = ResBlock(current_channels, current_channels, time_emb_dim)
+        self.mid_block1 = ResBlock(current_channels, current_channels, time_emb_dim, dropout=dropout)
+        self.mid_attn = AttentionBlock(current_channels)
+        self.mid_block2 = ResBlock(current_channels, current_channels, time_emb_dim, dropout=dropout)
 
         self.up_blocks = nn.ModuleList()
         self.upsamples = nn.ModuleList()
@@ -112,14 +159,24 @@ class UNet(nn.Module):
             blocks_in_level = num_res_blocks + 1
             for _ in range(blocks_in_level):
                 skip_channels = channels.pop()
-                block = ResBlock(current_channels + skip_channels, out_channels, time_emb_dim)
+                block = nn.ModuleList(
+                    [
+                        ResBlock(
+                            current_channels + skip_channels,
+                            out_channels,
+                            time_emb_dim,
+                            dropout=dropout,
+                        ),
+                        AttentionBlock(out_channels) if level in attention_levels else nn.Identity(),
+                    ]
+                )
                 level_blocks.append(block)
                 current_channels = out_channels
             self.up_blocks.append(level_blocks)
             if level != 0:
                 self.upsamples.append(Upsample(current_channels))
 
-        self.out_norm = nn.GroupNorm(8, current_channels)
+        self.out_norm = nn.GroupNorm(group_count(current_channels), current_channels)
         self.out_conv = nn.Conv2d(current_channels, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
@@ -128,21 +185,24 @@ class UNet(nn.Module):
 
         skips = [h]
         for level, blocks in enumerate(self.down_blocks):
-            for block in blocks:
-                h = block(h, time_emb)
+            for res_block, attn_block in blocks:
+                h = res_block(h, time_emb)
+                h = attn_block(h)
                 skips.append(h)
             if level < len(self.downsamples):
                 h = self.downsamples[level](h)
                 skips.append(h)
 
         h = self.mid_block1(h, time_emb)
+        h = self.mid_attn(h)
         h = self.mid_block2(h, time_emb)
 
         for level, blocks in enumerate(self.up_blocks):
-            for block in blocks:
+            for res_block, attn_block in blocks:
                 skip = skips.pop()
                 h = torch.cat([h, skip], dim=1)
-                h = block(h, time_emb)
+                h = res_block(h, time_emb)
+                h = attn_block(h)
             if level < len(self.upsamples):
                 h = self.upsamples[level](h)
 

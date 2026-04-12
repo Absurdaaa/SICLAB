@@ -20,6 +20,8 @@ def load_diffusion(checkpoint_path: str | Path, device: torch.device) -> tuple[G
         channel_multipliers=config.channel_multipliers,
         num_res_blocks=config.num_res_blocks,
         time_emb_dim=config.time_emb_dim,
+        dropout=getattr(config, "dropout", 0.0),
+        attention_levels=tuple(getattr(config, "attention_levels", ())),
     )
     diffusion = GaussianDiffusion(model, config.timesteps, config.beta_start, config.beta_end).to(device)
     state_dict = checkpoint.get("ema_model", checkpoint["model"])

@@ -33,7 +33,7 @@ def ensure_dir(path: str | Path) -> Path:
 
 
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
-    return model.module if isinstance(model, torch.nn.DataParallel) else model
+    return model.module if hasattr(model, "module") else model
 
 
 @torch.no_grad()
