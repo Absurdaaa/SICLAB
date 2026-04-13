@@ -128,11 +128,18 @@ def save_full_checkpoint(
     torch.save(checkpoint, output_dir / f"distill_full_epoch_{epoch:04d}.pt")
 
 
-def get_generator_sigma(diffusion, timestep: int, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+def get_generator_sigma(
+    diffusion,
+    timestep: int,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    sigma_max: float,
+) -> torch.Tensor:
     step = max(0, min(timestep, diffusion.timesteps - 1))
     sqrt_alpha = diffusion.sqrt_alphas_cumprod[step].to(device=device, dtype=dtype)
     sqrt_one_minus = diffusion.sqrt_one_minus_alphas_cumprod[step].to(device=device, dtype=dtype)
-    sigma = (sqrt_one_minus / sqrt_alpha.clamp_min(1e-6)).clamp_min(1e-4)
+    sigma = (sqrt_one_minus / sqrt_alpha.clamp_min(1e-6)).clamp(1e-4, sigma_max)
     return torch.full((batch_size,), float(sigma), device=device, dtype=dtype)
 
 
@@ -214,26 +221,31 @@ def train(config: DistillConfig) -> None:
                 batch.shape[0],
                 device,
                 batch.dtype,
+                config.generator_sigma_max,
             )
             z = torch.randn_like(batch) * generator_sigma[:, None, None, None]
-            z_ref_sigma = get_generator_sigma(
-                teacher_diffusion,
-                config.generator_sigma_timestep,
-                config.teacher_pair_batch_size,
-                device,
-                batch.dtype,
-            )
-            z_ref = (
-                torch.randn(
+            if config.reg_weight > 0.0 and config.teacher_pair_batch_size > 0:
+                z_ref_sigma = get_generator_sigma(
+                    teacher_diffusion,
+                    config.generator_sigma_timestep,
                     config.teacher_pair_batch_size,
-                    config.in_channels,
-                    config.image_size,
-                    config.image_size,
-                    device=device,
-                    dtype=batch.dtype,
+                    device,
+                    batch.dtype,
+                    config.generator_sigma_max,
                 )
-                * z_ref_sigma[:, None, None, None]
-            )
+                z_ref = (
+                    torch.randn(
+                        config.teacher_pair_batch_size,
+                        config.in_channels,
+                        config.image_size,
+                        config.image_size,
+                        device=device,
+                        dtype=batch.dtype,
+                    )
+                    * z_ref_sigma[:, None, None, None]
+                )
+            else:
+                z_ref = torch.empty(0, config.in_channels, config.image_size, config.image_size, device=device, dtype=batch.dtype)
             timesteps = torch.randint(
                 config.min_timestep,
                 config.max_timestep + 1,
@@ -255,6 +267,12 @@ def train(config: DistillConfig) -> None:
                     timesteps,
                     reg_weight=config.reg_weight,
                 )
+            if not torch.isfinite(gen_loss):
+                raise RuntimeError(
+                    "Non-finite generator loss detected. "
+                    f"sigma={generator_sigma[0].item():.4f}, "
+                    f"timestep_range=[{int(timesteps.min())}, {int(timesteps.max())}]"
+                )
             scaler_g.scale(gen_loss).backward()
             scaler_g.unscale_(optimizer_g)
             clip_grad_norm_(unwrap_model(student).parameters(), config.grad_clip)
@@ -271,6 +289,12 @@ def train(config: DistillConfig) -> None:
                     mu_fake_diffusion.model,
                     x_for_denoiser,
                     denoise_timesteps,
+                )
+            if not torch.isfinite(diff_loss):
+                raise RuntimeError(
+                    "Non-finite denoising loss detected. "
+                    f"sigma={generator_sigma[0].item():.4f}, "
+                    f"timestep_range=[{int(denoise_timesteps.min())}, {int(denoise_timesteps.max())}]"
                 )
             scaler_d.scale(diff_loss).backward()
             scaler_d.unscale_(optimizer_d)
@@ -309,6 +333,7 @@ def train(config: DistillConfig) -> None:
                 config.num_sample_images,
                 device,
                 torch.float32,
+                config.generator_sigma_max,
             )
             samples = ema_student(
                 torch.randn(

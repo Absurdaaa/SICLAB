@@ -50,7 +50,7 @@ def main() -> None:
     step = max(0, min(config.generator_sigma_timestep, teacher_diffusion.timesteps - 1))
     sqrt_alpha = teacher_diffusion.sqrt_alphas_cumprod[step].to(device=device, dtype=torch.float32)
     sqrt_one_minus = teacher_diffusion.sqrt_one_minus_alphas_cumprod[step].to(device=device, dtype=torch.float32)
-    sigma_value = (sqrt_one_minus / sqrt_alpha.clamp_min(1e-6)).clamp_min(1e-4)
+    sigma_value = (sqrt_one_minus / sqrt_alpha.clamp_min(1e-6)).clamp(1e-4, config.generator_sigma_max)
     sigma = torch.full((args.num_samples,), float(sigma_value), device=device)
     noise = torch.randn(args.num_samples, config.in_channels, config.image_size, config.image_size, device=device) * sigma[:, None, None, None]
     samples = model(noise, sigma)

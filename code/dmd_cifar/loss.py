@@ -31,8 +31,9 @@ def distribution_matching_loss(
         pred_fake = predict_x0(diffusion, mu_fake_model, x_t, timesteps)
         pred_real = predict_x0(diffusion, mu_real_model, x_t, timesteps)
 
-    weighting_factor = torch.abs(x - pred_real).mean(dim=(1, 2, 3), keepdim=True).clamp_min(1e-5)
+    weighting_factor = torch.abs(x - pred_real).mean(dim=(1, 2, 3), keepdim=True).clamp_min(5e-2)
     grad = (pred_fake - pred_real) / weighting_factor
+    grad = grad.clamp(-5.0, 5.0)
     target = (x - grad).detach()
     loss = 0.5 * F.mse_loss(x, target)
     return loss, {"dm_loss": float(loss.detach())}
@@ -66,10 +67,12 @@ def generator_loss(
     x = student(z, generator_sigma)
     dm_loss, dm_stats = distribution_matching_loss(diffusion, mu_real_model, mu_fake_model, x, timesteps)
 
-    with torch.no_grad():
-        y_ref = diffusion.sample_from_noise(z_ref).detach()
-    x_ref = student(z_ref, generator_sigma[: z_ref.shape[0]])
-    reg_loss = F.l1_loss(x_ref, y_ref)
+    reg_loss = x.new_zeros(())
+    if reg_weight > 0.0 and z_ref.numel() > 0:
+        with torch.no_grad():
+            y_ref = diffusion.sample_from_noise(z_ref).detach()
+        x_ref = student(z_ref, generator_sigma[: z_ref.shape[0]])
+        reg_loss = F.l1_loss(x_ref, y_ref)
     total = dm_loss + reg_weight * reg_loss
     stats = {
         **dm_stats,
