@@ -8,7 +8,6 @@ import torch.nn.functional as F
 from ddpm_cifar.diffusion import extract
 
 
-@torch.no_grad()
 def predict_x0(diffusion, model, x_t: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
     eps_pred = model(x_t, timesteps)
     sqrt_alpha = extract(diffusion.sqrt_alphas_cumprod, timesteps, x_t.shape)
@@ -45,7 +44,8 @@ def denoising_loss(
     x: torch.Tensor,
     timesteps: torch.Tensor,
 ) -> tuple[torch.Tensor, Dict[str, float]]:
-    x_t, _ = diffusion.q_sample(x.detach(), timesteps)
+    with torch.no_grad():
+        x_t, _ = diffusion.q_sample(x.detach(), timesteps)
     pred_fake = predict_x0(diffusion, mu_fake_model, x_t, timesteps)
     weight = 1.0 / extract(diffusion.sqrt_one_minus_alphas_cumprod, timesteps, x_t.shape).pow(2).clamp_min(1e-5)
     loss = torch.mean(weight * (pred_fake - x.detach()) ** 2)

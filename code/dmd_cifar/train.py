@@ -159,6 +159,7 @@ def train(config: DistillConfig) -> None:
         teacher_cfg.beta_start,
         teacher_cfg.beta_end,
     ).to(device)
+    mu_fake_diffusion.model.requires_grad_(True)
 
     dataset = CIFAR10BatchDataset(teacher_cfg.data_dir, split="train")
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=get_rank(), shuffle=True) if world_size > 1 else None
@@ -175,8 +176,18 @@ def train(config: DistillConfig) -> None:
     student = build_student(config).to(device)
     ema_student = copy.deepcopy(student).eval().to(device)
     if world_size > 1:
-        student = DDP(student, device_ids=[device.index], output_device=device.index)
-        mu_fake_diffusion.model = DDP(mu_fake_diffusion.model, device_ids=[device.index], output_device=device.index)
+        student = DDP(
+            student,
+            device_ids=[device.index],
+            output_device=device.index,
+            find_unused_parameters=True,
+        )
+        mu_fake_diffusion.model = DDP(
+            mu_fake_diffusion.model,
+            device_ids=[device.index],
+            output_device=device.index,
+            find_unused_parameters=True,
+        )
         if is_main_process():
             print(f"Using DDP on {world_size} GPUs for distillation")
 
@@ -252,6 +263,7 @@ def train(config: DistillConfig) -> None:
             update_ema(ema_student, student, config.ema_decay)
 
             optimizer_d.zero_grad(set_to_none=True)
+            x_for_denoiser = x_for_denoiser.detach()
             denoise_timesteps = torch.randint(1, config.max_timestep + 1, (x_for_denoiser.shape[0],), device=device, dtype=torch.long)
             with autocast_context(device, enabled=(config.use_amp and device.type == "cuda")):
                 diff_loss, diff_stats = denoising_loss(
