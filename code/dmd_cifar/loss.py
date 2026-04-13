@@ -28,8 +28,9 @@ def distribution_matching_loss(
     x_t, _ = diffusion.q_sample(x, timesteps, noise=noise)
 
     with torch.no_grad():
-        pred_fake = predict_x0(diffusion, mu_fake_model, x_t, timesteps)
-        pred_real = predict_x0(diffusion, mu_real_model, x_t, timesteps)
+        pred_fake = predict_x0(diffusion, mu_fake_model, x_t, timesteps).float()
+        pred_real = predict_x0(diffusion, mu_real_model, x_t, timesteps).float()
+    x = x.float()
 
     weighting_factor = torch.abs(x - pred_real).mean(dim=(1, 2, 3), keepdim=True).clamp_min(5e-2)
     grad = (pred_fake - pred_real) / weighting_factor
@@ -47,9 +48,11 @@ def denoising_loss(
 ) -> tuple[torch.Tensor, Dict[str, float]]:
     with torch.no_grad():
         x_t, _ = diffusion.q_sample(x.detach(), timesteps)
-    pred_fake = predict_x0(diffusion, mu_fake_model, x_t, timesteps)
+    pred_fake = predict_x0(diffusion, mu_fake_model, x_t, timesteps).float()
+    x = x.detach().float()
     weight = 1.0 / extract(diffusion.sqrt_one_minus_alphas_cumprod, timesteps, x_t.shape).pow(2).clamp_min(1e-5)
-    loss = torch.mean(weight * (pred_fake - x.detach()) ** 2)
+    weight = weight.float()
+    loss = torch.mean(weight * (pred_fake - x) ** 2)
     return loss, {"denoise_loss": float(loss.detach())}
 
 

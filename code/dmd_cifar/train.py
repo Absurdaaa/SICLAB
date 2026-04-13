@@ -282,7 +282,13 @@ def train(config: DistillConfig) -> None:
 
             optimizer_d.zero_grad(set_to_none=True)
             x_for_denoiser = x_for_denoiser.detach()
-            denoise_timesteps = torch.randint(1, config.max_timestep + 1, (x_for_denoiser.shape[0],), device=device, dtype=torch.long)
+            denoise_timesteps = torch.randint(
+                config.min_timestep,
+                config.max_timestep + 1,
+                (x_for_denoiser.shape[0],),
+                device=device,
+                dtype=torch.long,
+            )
             with autocast_context(device, enabled=(config.use_amp and device.type == "cuda")):
                 diff_loss, diff_stats = denoising_loss(
                     teacher_diffusion,

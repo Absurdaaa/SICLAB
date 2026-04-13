@@ -27,8 +27,8 @@ class DistillConfig:
     grad_clip: float = 1.0
     ema_decay: float = 0.999
     reg_weight: float = 0.25
-    min_timestep: int = 10
-    max_timestep: int = 999
+    min_timestep: int = 20
+    max_timestep: int = 980
     generator_sigma_timestep: int = 400
     generator_sigma_max: float = 10.0
     teacher_pair_batch_size: int = 16

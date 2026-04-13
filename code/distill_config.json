@@ -17,8 +17,8 @@
   "grad_clip": 1.0,
   "ema_decay": 0.999,
   "reg_weight": 0.0,
-  "min_timestep": 10,
-  "max_timestep": 999,
+  "min_timestep": 20,
+  "max_timestep": 980,
   "generator_sigma_timestep": 400,
   "generator_sigma_max": 10.0,
   "teacher_pair_batch_size": 0,
@@ -28,5 +28,5 @@
   "seed": 42,
   "device": "auto",
   "use_ddp": true,
-  "use_amp": true
+  "use_amp": false
 }
