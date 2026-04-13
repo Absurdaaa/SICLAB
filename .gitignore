@@ -4,3 +4,4 @@ code/outputs/
 weight/
 /code/ddpm_cifar/__pycache__/
 /code/__pycache__/
+code/distill_outputs/
