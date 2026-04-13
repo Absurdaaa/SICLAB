@@ -22,9 +22,10 @@ except ImportError:
     HAS_TORCH_AMP = False
 
 from dmd_cifar.config import DistillConfig
-from dmd_cifar.loss import distillation_loss
+from dmd_cifar.loss import denoising_loss, generator_loss
 from dmd_cifar.student import OneStepGenerator
 from ddpm_cifar.dataset import CIFAR10BatchDataset
+from ddpm_cifar.diffusion import GaussianDiffusion
 from ddpm_cifar.utils import ensure_dir, get_device, save_image_grid, set_seed, unwrap_model, update_ema
 from sample import load_diffusion
 
@@ -105,6 +106,36 @@ def save_checkpoint(output_dir: Path, epoch: int, student, ema_student, optimize
     torch.save(checkpoint, output_dir / f"distill_epoch_{epoch:04d}.pt")
 
 
+def save_full_checkpoint(
+    output_dir: Path,
+    epoch: int,
+    student,
+    ema_student,
+    mu_fake_diffusion,
+    optimizer_g,
+    optimizer_d,
+    config: DistillConfig,
+) -> None:
+    checkpoint = {
+        "epoch": epoch,
+        "student": unwrap_model(student).state_dict(),
+        "ema_student": unwrap_model(ema_student).state_dict(),
+        "mu_fake_model": unwrap_model(mu_fake_diffusion.model).state_dict(),
+        "optimizer_g": optimizer_g.state_dict(),
+        "optimizer_d": optimizer_d.state_dict(),
+        "config": config.to_dict(),
+    }
+    torch.save(checkpoint, output_dir / f"distill_full_epoch_{epoch:04d}.pt")
+
+
+def get_generator_sigma(diffusion, timestep: int, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    step = max(0, min(timestep, diffusion.timesteps - 1))
+    sqrt_alpha = diffusion.sqrt_alphas_cumprod[step].to(device=device, dtype=dtype)
+    sqrt_one_minus = diffusion.sqrt_one_minus_alphas_cumprod[step].to(device=device, dtype=dtype)
+    sigma = (sqrt_one_minus / sqrt_alpha.clamp_min(1e-6)).clamp_min(1e-4)
+    return torch.full((batch_size,), float(sigma), device=device, dtype=dtype)
+
+
 def train(config: DistillConfig) -> None:
     device, world_size = setup_runtime(config)
     set_seed(config.seed + get_rank())
@@ -122,6 +153,12 @@ def train(config: DistillConfig) -> None:
     teacher_diffusion, teacher_cfg = load_diffusion(config.teacher_checkpoint, device)
     teacher_diffusion.eval()
     teacher_diffusion.requires_grad_(False)
+    mu_fake_diffusion = GaussianDiffusion(
+        copy.deepcopy(teacher_diffusion.model),
+        teacher_cfg.timesteps,
+        teacher_cfg.beta_start,
+        teacher_cfg.beta_end,
+    ).to(device)
 
     dataset = CIFAR10BatchDataset(teacher_cfg.data_dir, split="train")
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=get_rank(), shuffle=True) if world_size > 1 else None
@@ -139,54 +176,128 @@ def train(config: DistillConfig) -> None:
     ema_student = copy.deepcopy(student).eval().to(device)
     if world_size > 1:
         student = DDP(student, device_ids=[device.index], output_device=device.index)
+        mu_fake_diffusion.model = DDP(mu_fake_diffusion.model, device_ids=[device.index], output_device=device.index)
         if is_main_process():
             print(f"Using DDP on {world_size} GPUs for distillation")
 
-    optimizer = AdamW(unwrap_model(student).parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-    scaler = make_grad_scaler(enabled=(config.use_amp and device.type == "cuda"))
+    optimizer_g = AdamW(unwrap_model(student).parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    optimizer_d = AdamW(unwrap_model(mu_fake_diffusion.model).parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    scaler_g = make_grad_scaler(enabled=(config.use_amp and device.type == "cuda"))
+    scaler_d = make_grad_scaler(enabled=(config.use_amp and device.type == "cuda"))
 
     for epoch in range(1, config.epochs + 1):
         if sampler is not None:
             sampler.set_epoch(epoch)
 
         unwrap_model(student).train()
-        running_loss = 0.0
+        unwrap_model(mu_fake_diffusion.model).train()
+        running_gen_loss = 0.0
+        running_denoise_loss = 0.0
         progress = tqdm(dataloader, desc=f"Distill {epoch}/{config.epochs}", disable=not is_main_process(), leave=False)
 
         for batch in progress:
             batch = batch.to(device, non_blocking=True)
-            noise = torch.randn_like(batch)
+            generator_sigma = get_generator_sigma(
+                teacher_diffusion,
+                config.generator_sigma_timestep,
+                batch.shape[0],
+                device,
+                batch.dtype,
+            )
+            z = torch.randn_like(batch) * generator_sigma[:, None, None, None]
+            z_ref_sigma = get_generator_sigma(
+                teacher_diffusion,
+                config.generator_sigma_timestep,
+                config.teacher_pair_batch_size,
+                device,
+                batch.dtype,
+            )
+            z_ref = (
+                torch.randn(
+                    config.teacher_pair_batch_size,
+                    config.in_channels,
+                    config.image_size,
+                    config.image_size,
+                    device=device,
+                    dtype=batch.dtype,
+                )
+                * z_ref_sigma[:, None, None, None]
+            )
             timesteps = torch.randint(
                 config.min_timestep,
                 config.max_timestep + 1,
-                (batch.shape[0],),
+                (z.shape[0],),
                 device=device,
                 dtype=torch.long,
             )
 
-            optimizer.zero_grad(set_to_none=True)
+            optimizer_g.zero_grad(set_to_none=True)
             with autocast_context(device, enabled=(config.use_amp and device.type == "cuda")):
-                loss, stats, _ = distillation_loss(teacher_diffusion, student, noise, timesteps, alpha_reg=config.alpha_reg)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+                gen_loss, gen_stats, x_for_denoiser = generator_loss(
+                    teacher_diffusion,
+                    student,
+                    teacher_diffusion.model,
+                    mu_fake_diffusion.model,
+                    z,
+                    z_ref,
+                    generator_sigma,
+                    timesteps,
+                    reg_weight=config.reg_weight,
+                )
+            scaler_g.scale(gen_loss).backward()
+            scaler_g.unscale_(optimizer_g)
             clip_grad_norm_(unwrap_model(student).parameters(), config.grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
+            scaler_g.step(optimizer_g)
+            scaler_g.update()
             update_ema(ema_student, student, config.ema_decay)
 
-            running_loss += loss.item()
-            if is_main_process():
-                progress.set_postfix(loss=f"{loss.item():.4f}", match=f"{stats['match_loss']:.4f}")
+            optimizer_d.zero_grad(set_to_none=True)
+            denoise_timesteps = torch.randint(1, config.max_timestep + 1, (x_for_denoiser.shape[0],), device=device, dtype=torch.long)
+            with autocast_context(device, enabled=(config.use_amp and device.type == "cuda")):
+                diff_loss, diff_stats = denoising_loss(
+                    teacher_diffusion,
+                    mu_fake_diffusion.model,
+                    x_for_denoiser,
+                    denoise_timesteps,
+                )
+            scaler_d.scale(diff_loss).backward()
+            scaler_d.unscale_(optimizer_d)
+            clip_grad_norm_(unwrap_model(mu_fake_diffusion.model).parameters(), config.grad_clip)
+            scaler_d.step(optimizer_d)
+            scaler_d.update()
 
-        epoch_loss = torch.tensor(running_loss / len(dataloader), device=device)
+            running_gen_loss += gen_loss.item()
+            running_denoise_loss += diff_loss.item()
+            if is_main_process():
+                progress.set_postfix(
+                    gen=f"{gen_loss.item():.4f}",
+                    dm=f"{gen_stats['dm_loss']:.4f}",
+                    reg=f"{gen_stats['reg_loss']:.4f}",
+                    d=f"{diff_loss.item():.4f}",
+                )
+
+        epoch_gen_loss = torch.tensor(running_gen_loss / len(dataloader), device=device)
+        epoch_denoise_loss = torch.tensor(running_denoise_loss / len(dataloader), device=device)
         if is_distributed():
-            dist.all_reduce(epoch_loss, op=dist.ReduceOp.SUM)
-            epoch_loss /= world_size
+            dist.all_reduce(epoch_gen_loss, op=dist.ReduceOp.SUM)
+            dist.all_reduce(epoch_denoise_loss, op=dist.ReduceOp.SUM)
+            epoch_gen_loss /= world_size
+            epoch_denoise_loss /= world_size
         if is_main_process():
-            print(f"epoch={epoch} distill_loss={epoch_loss.item():.6f}")
+            print(
+                f"epoch={epoch} gen_loss={epoch_gen_loss.item():.6f} "
+                f"denoise_loss={epoch_denoise_loss.item():.6f}"
+            )
 
         if is_main_process() and epoch % config.sample_every == 0:
             ema_student.eval()
+            sample_sigma = get_generator_sigma(
+                teacher_diffusion,
+                config.generator_sigma_timestep,
+                config.num_sample_images,
+                device,
+                torch.float32,
+            )
             samples = ema_student(
                 torch.randn(
                     config.num_sample_images,
@@ -194,12 +305,23 @@ def train(config: DistillConfig) -> None:
                     config.image_size,
                     config.image_size,
                     device=device,
-                )
+                ) * sample_sigma[:, None, None, None],
+                sample_sigma,
             )
             save_image_grid(samples, output_dir / "samples" / f"epoch_{epoch:04d}.png")
 
         if is_main_process() and epoch % config.save_every == 0:
-            save_checkpoint(output_dir / "checkpoints", epoch, student, ema_student, optimizer, config)
+            save_checkpoint(output_dir / "checkpoints", epoch, student, ema_student, optimizer_g, config)
+            save_full_checkpoint(
+                output_dir / "checkpoints",
+                epoch,
+                student,
+                ema_student,
+                mu_fake_diffusion,
+                optimizer_g,
+                optimizer_d,
+                config,
+            )
 
     cleanup_runtime()
 

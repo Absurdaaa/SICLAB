@@ -4,7 +4,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from ddpm_cifar.model import AttentionBlock, ResBlock, group_count
+from ddpm_cifar.model import AttentionBlock, ResBlock, SinusoidalTimeEmbedding, group_count
 
 
 class OneStepGenerator(nn.Module):
@@ -21,6 +21,13 @@ class OneStepGenerator(nn.Module):
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
+        self.emb_dim = base_channels * 4
+        self.sigma_embed = nn.Sequential(
+            SinusoidalTimeEmbedding(base_channels),
+            nn.Linear(base_channels, self.emb_dim),
+            nn.SiLU(),
+            nn.Linear(self.emb_dim, self.emb_dim),
+        )
         self.input_conv = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
 
         self.down_blocks = nn.ModuleList()
@@ -35,7 +42,7 @@ class OneStepGenerator(nn.Module):
                 blocks.append(
                     nn.ModuleList(
                         [
-                            ResBlock(current_channels, out_channels, time_emb_dim=base_channels, dropout=dropout),
+                            ResBlock(current_channels, out_channels, time_emb_dim=self.emb_dim, dropout=dropout),
                             AttentionBlock(out_channels) if level in attention_levels else nn.Identity(),
                         ]
                     )
@@ -68,7 +75,7 @@ class OneStepGenerator(nn.Module):
                 blocks.append(
                     nn.ModuleList(
                         [
-                            ResBlock(current_channels + skip_ch, out_channels, time_emb_dim=base_channels, dropout=dropout),
+                            ResBlock(current_channels + skip_ch, out_channels, time_emb_dim=self.emb_dim, dropout=dropout),
                             AttentionBlock(out_channels) if level in attention_levels else nn.Identity(),
                         ]
                     )
@@ -81,14 +88,15 @@ class OneStepGenerator(nn.Module):
         self.out_norm = nn.GroupNorm(group_count(current_channels), current_channels)
         self.out_conv = nn.Conv2d(current_channels, in_channels, kernel_size=3, padding=1)
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        dummy_emb = torch.zeros(z.shape[0], self.input_conv.out_channels, device=z.device, dtype=z.dtype)
+    def forward(self, z: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+        sigma = sigma.reshape(-1).to(z.device, z.dtype)
+        sigma_emb = self.sigma_embed(torch.log(sigma.clamp_min(1e-4)))
         h = self.input_conv(z)
         skips = [h]
 
         for level, blocks in enumerate(self.down_blocks):
             for res_block, attn_block in blocks:
-                h = res_block(h, dummy_emb)
+                h = res_block(h, sigma_emb)
                 h = attn_block(h)
                 skips.append(h)
             if level < len(self.downsamples):
@@ -101,7 +109,7 @@ class OneStepGenerator(nn.Module):
             for res_block, attn_block in blocks:
                 skip = skips.pop()
                 h = torch.cat([h, skip], dim=1)
-                h = res_block(h, dummy_emb)
+                h = res_block(h, sigma_emb)
                 h = attn_block(h)
             if level < len(self.upsamples):
                 h = F.interpolate(h, scale_factor=2.0, mode="nearest")

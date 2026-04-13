@@ -73,7 +73,11 @@ class GaussianDiffusion(nn.Module):
     @torch.no_grad()
     def sample(self, num_samples: int, image_size: int, device: torch.device, channels: int = 3) -> torch.Tensor:
         x = torch.randn(num_samples, channels, image_size, image_size, device=device)
+        return self.sample_from_noise(x)
+
+    @torch.no_grad()
+    def sample_from_noise(self, x: torch.Tensor) -> torch.Tensor:
         for timestep in reversed(range(self.timesteps)):
-            t = torch.full((num_samples,), timestep, device=device, dtype=torch.long)
+            t = torch.full((x.shape[0],), timestep, device=x.device, dtype=torch.long)
             x = self.p_sample(x, t)
         return x

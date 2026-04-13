@@ -8,6 +8,7 @@ import torch
 from dmd_cifar.config import DistillConfig
 from dmd_cifar.student import OneStepGenerator
 from ddpm_cifar.utils import ensure_dir, get_device, save_image_grid
+from sample import load_diffusion
 
 
 def load_student(checkpoint_path: str | Path, device: torch.device) -> tuple[OneStepGenerator, DistillConfig]:
@@ -45,8 +46,14 @@ def main() -> None:
     args = parse_args()
     device = get_device(args.device)
     model, config = load_student(args.checkpoint, device)
-    noise = torch.randn(args.num_samples, config.in_channels, config.image_size, config.image_size, device=device)
-    samples = model(noise)
+    teacher_diffusion, _ = load_diffusion(config.teacher_checkpoint, device)
+    step = max(0, min(config.generator_sigma_timestep, teacher_diffusion.timesteps - 1))
+    sqrt_alpha = teacher_diffusion.sqrt_alphas_cumprod[step].to(device=device, dtype=torch.float32)
+    sqrt_one_minus = teacher_diffusion.sqrt_one_minus_alphas_cumprod[step].to(device=device, dtype=torch.float32)
+    sigma_value = (sqrt_one_minus / sqrt_alpha.clamp_min(1e-6)).clamp_min(1e-4)
+    sigma = torch.full((args.num_samples,), float(sigma_value), device=device)
+    noise = torch.randn(args.num_samples, config.in_channels, config.image_size, config.image_size, device=device) * sigma[:, None, None, None]
+    samples = model(noise, sigma)
     output_path = Path(args.output)
     ensure_dir(output_path.parent)
     save_image_grid(samples, output_path)
