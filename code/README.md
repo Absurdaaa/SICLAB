@@ -111,9 +111,9 @@ python3 generate_eval_images.py \
 ```bash
 cd code
 torchrun --standalone --nproc_per_node=4 generate_eval_images.py \
-  --checkpoint outputs/checkpoints/checkpoint_epoch_0010.pt \
+  --checkpoint /nfs/tangwenhao/lhp/outputs_teacher/checkpoints/teacher_epoch_0300.pt \
   --output-dir outputs/generated_eval_images \
-  --num-images 50000 \
+  --num-images 10000 \
   --batch-size 100
 ```
 
@@ -125,10 +125,16 @@ torchrun --standalone --nproc_per_node=4 generate_eval_images.py \
 cd code
 python3 eval_metrics.py \
   --real-dir outputs/real_test_images \
-  --generated-dir outputs/generated_eval_images \
-  --batch-size 64 \
+  --generated-dir /tangwenhao/lhp/SICLAB/code/consistency-models/outputs_teacher/eval_images \
+  --batch-size 128 \
   --device cuda:0
 ```
+
+Inception Score: 7.703035 ± 0.1818404
+Frechet Inception Distance: 16.3495
+inception_score_mean: 7.703034714135143
+inception_score_std: 0.18184039969660493
+frechet_inception_distance: 16.349504386597005
 
 说明：
 
