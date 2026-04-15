@@ -124,7 +124,7 @@ teacher：
 ```bash
 torchrun --standalone --nproc_per_node=4 generate_eval_images.py \
   --model-type teacher \
-  --checkpoint outputs_teacher/checkpoints/teacher_epoch_0100.pt \
+  --checkpoint /nfs/tangwenhao/lhp/outputs_teacher/checkpoints/teacher_epoch_0300.pt \
   --output-dir outputs_teacher/eval_images \
   --num-images 10000 \
   --batch-size 100
