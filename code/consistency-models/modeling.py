@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-
 import torch
 from diffusers import DDPMScheduler, DDIMScheduler, UNet2DModel
 
@@ -37,14 +36,21 @@ def build_unet(
 
 
 class ConsistencyModel(torch.nn.Module):
-    def __init__(self, unet: UNet2DModel, sigma_data: float = 0.5) -> None:
+    def __init__(
+        self,
+        unet: UNet2DModel,
+        sigma_data: float = 0.5,
+        sigma_min: float = 0.002,
+    ) -> None:
         super().__init__()
         self.unet = unet
         self.sigma_data = sigma_data
+        self.sigma_min = sigma_min
 
     def forward(self, x: torch.Tensor, sigma: torch.Tensor, clip_output: bool = True) -> torch.Tensor:
         sigma = sigma.reshape(-1).to(x.device, x.dtype)
-        c_skip = (self.sigma_data**2) / (sigma.pow(2) + self.sigma_data**2)
+        sigma_delta = (sigma - self.sigma_min).clamp_min(0.0)
+        c_skip = (self.sigma_data**2) / (sigma_delta.pow(2) + self.sigma_data**2)
         c_out = sigma * self.sigma_data / torch.sqrt(sigma.pow(2) + self.sigma_data**2)
         model_out = self.unet(x, sigma).sample
         out = c_skip[:, None, None, None] * x + c_out[:, None, None, None] * model_out
@@ -75,6 +81,26 @@ def sigma_from_scheduler(scheduler: DDPMScheduler | DDIMScheduler, timesteps: to
     return torch.sqrt((1.0 - alpha_bar) / alpha_bar)
 
 
+def sigma_schedule(num_points: int, sigma_min: float, sigma_max: float, rho: float, device: torch.device) -> torch.Tensor:
+    ramp = torch.linspace(0, 1, steps=num_points, device=device, dtype=torch.float32)
+    min_inv_rho = sigma_min ** (1.0 / rho)
+    max_inv_rho = sigma_max ** (1.0 / rho)
+    return (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)).pow(rho)
+
+
+def sigma_to_timestep(
+    scheduler: DDPMScheduler | DDIMScheduler,
+    sigma: torch.Tensor,
+) -> torch.Tensor:
+    sigma = sigma.reshape(-1).to(dtype=torch.float32)
+    schedule = sigma_from_scheduler(
+        scheduler,
+        torch.arange(scheduler.config.num_train_timesteps, device=sigma.device),
+    )
+    distances = torch.abs(schedule[None, :] - sigma[:, None])
+    return torch.argmin(distances, dim=1).long()
+
+
 def ddim_step_between(
     scheduler: DDIMScheduler,
     teacher: UNet2DModel,
@@ -91,6 +117,18 @@ def ddim_step_between(
     return x_s.clamp(-1.0, 1.0)
 
 
+def ddim_step_between_sigma(
+    scheduler: DDIMScheduler,
+    teacher: UNet2DModel,
+    x_t: torch.Tensor,
+    sigma_t: torch.Tensor,
+    sigma_s: torch.Tensor,
+) -> torch.Tensor:
+    t = sigma_to_timestep(scheduler, sigma_t).to(x_t.device)
+    s = sigma_to_timestep(scheduler, sigma_s).to(x_t.device)
+    return ddim_step_between(scheduler, teacher, x_t, t, s)
+
+
 def clone_model(model: torch.nn.Module) -> torch.nn.Module:
     return copy.deepcopy(model)
 
@@ -102,6 +140,8 @@ __all__ = [
     "build_unet",
     "clone_model",
     "ddim_step_between",
+    "ddim_step_between_sigma",
+    "sigma_schedule",
+    "sigma_to_timestep",
     "sigma_from_scheduler",
 ]
-

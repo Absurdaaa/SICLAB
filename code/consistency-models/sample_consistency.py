@@ -38,7 +38,9 @@ def main() -> None:
         config.layers_per_block,
         config.attention_levels,
     ).to(device)
-    model = ConsistencyModel(unet, sigma_data=config.sigma_data).to(device)
+    model = ConsistencyModel(unet, sigma_data=config.sigma_data, sigma_min=config.sigma_min).to(device)
+    model.sigma_max = config.sigma_max
+    model.bins_rho = config.bins_rho
     model.load_state_dict(checkpoint.get("ema_model", checkpoint["model"]))
     model.eval()
     scheduler = build_ddim_scheduler(config.num_train_timesteps, config.beta_schedule)
@@ -59,4 +61,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

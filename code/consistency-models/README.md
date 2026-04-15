@@ -5,22 +5,23 @@
 1. 用 `diffusers.UNet2DModel + DDPMScheduler` 训练一个 CIFAR-10 diffusion teacher
 2. 用训练好的 teacher 做 consistency distillation，得到一步/少步采样模型
 
-这版实现是“论文思想 + 工程可运行版本”，不是论文 `2303.01469` 的全量复刻。
-它保留了核心结构：
+这版实现是“更接近论文 `2303.01469` 的工程版本”，仍然不是逐行复刻，但已经补上了原先最关键的几处缺口：
 
 - teacher: 标准噪声预测 diffusion
-- student: consistency skip/out parameterization
-- distillation: 用 teacher 把相邻时间点连接起来，再让 consistency model 保持输出一致
+- student: continuous-time consistency skip/out parameterization
+- distillation: 用 Karras 风格 sigma 调度构造相邻噪声对，再让 consistency model 保持输出一致
+- schedule: 近似论文的 `N(k)` / `mu(k)` 风格 bins 与 EMA 调度
+- loss: 支持 `LPIPS + L1`
 
 ## 依赖
 
 至少需要：
 
 ```bash
-pip install diffusers
+pip install diffusers torchmetrics
 ```
 
-如果你的环境里已经有 `torch`、`tqdm`、`numpy`、`Pillow`，就够跑这套代码。
+如果你的环境里已经有 `torch`、`tqdm`、`numpy`、`Pillow`，再补 `torchmetrics` 就能启用更接近论文的 LPIPS 蒸馏损失。没有这个依赖时，代码会自动退回像素损失。
 
 ## 训练 teacher
 
@@ -85,18 +86,19 @@ python3 sample_consistency.py \
   - 标准 DDPM 训练
   - teacher 预测噪声
 - `distill_train.py`
-  - 从 batch 图像构造 `x_t`
-  - 用 teacher 的 DDIM-style deterministic step 得到相邻较小噪声点 `x_s`
-  - 让 `student(x_t, sigma_t)` 拟合 `ema_student(x_s, sigma_s)`
+  - 用 Karras 风格连续 sigma 网格构造相邻 `(sigma_t, sigma_s)`
+  - 用 teacher 的 DDIM-style deterministic step 近似 PF-ODE 邻接点
+  - 用论文风格 EMA 调度，让 `student(x_t, sigma_t)` 拟合 `ema_student(x_s, sigma_s)`
+  - 默认使用 `LPIPS + L1`
 - `modeling.py`
   - `ConsistencyModel` 的 skip/out 参数化
-  - teacher 的 DDPM/DDIM scheduler
+  - 连续 sigma 调度与 teacher timestep 映射
 
 ## 目前的边界
 
-这版没有实现：
+这版仍然没有实现：
 
-- 论文里的完整 continuous-time PF-ODE distillation
+- 真正连续 teacher solver 下的完整 PF-ODE 积分
 - FID/IS 评估脚本
 
 如果后面需要，可以继续往这几个方向补。

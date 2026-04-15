@@ -8,7 +8,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, DistributedSampler
@@ -23,13 +22,15 @@ except ImportError:
 
 from config import DistillConfig
 from data import CIFAR10BatchDataset
+from losses import ConsistencyLoss
 from modeling import (
     ConsistencyModel,
     build_ddim_scheduler,
     build_unet,
     clone_model,
-    ddim_step_between,
-    sigma_from_scheduler,
+    ddim_step_between_sigma,
+    sigma_schedule,
+    sigma_to_timestep,
 )
 from utils import ensure_dir, get_device, save_image_grid, set_seed, unwrap_model, update_ema
 
@@ -105,36 +106,53 @@ def load_teacher(checkpoint_path: str | Path, device: torch.device):
     return unet, teacher_cfg
 
 
-def get_bins(global_step: int, total_steps: int, bins_min: int, bins_max: int) -> int:
+def get_bins(global_step: int, total_steps: int, bins_min: int, bins_max: int, schedule: str = "paper") -> int:
     progress = min(max(global_step / max(total_steps, 1), 0.0), 1.0)
-    return int(math.ceil(bins_min + progress * (bins_max - bins_min)))
+    if schedule != "paper":
+        return int(math.ceil(bins_min + progress * (bins_max - bins_min)))
+    return int(math.ceil(math.sqrt(progress * (bins_max**2 - bins_min**2) + bins_min**2)))
 
 
-def make_timestep_pairs(batch_size: int, num_train_timesteps: int, bins: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    grid = torch.linspace(0, num_train_timesteps - 1, steps=bins, device=device).round().long()
+def get_ema_decay(global_step: int, total_steps: int, bins: int, config: DistillConfig) -> float:
+    if config.ema_decay_schedule != "paper":
+        return config.ema_decay
+    progress = min(max(global_step / max(total_steps, 1), 0.0), 1.0)
+    initial = min(max(config.ema_decay, 1e-6), 0.999999)
+    target = min(max(config.ema_decay_target, initial), 0.999999)
+    base = initial + (target - initial) * progress
+    return float(math.exp(config.bins_min * math.log(base) / max(bins, 1)))
+
+
+def make_sigma_pairs(
+    batch_size: int,
+    bins: int,
+    sigma_min: float,
+    sigma_max: float,
+    rho: float,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    grid = sigma_schedule(bins, sigma_min, sigma_max, rho, device)
     idx = torch.randint(0, bins - 1, (batch_size,), device=device)
-    s = grid[idx]
-    t = grid[idx + 1]
-    return s, t
+    sigma_t = grid[idx]
+    sigma_s = grid[idx + 1]
+    return sigma_s, sigma_t
 
 
 def sample_consistency(model: ConsistencyModel, scheduler, num_samples: int, image_size: int, channels: int, device: torch.device, steps: int) -> torch.Tensor:
     model = unwrap_model(model)
-    if steps <= 1:
-        grid = torch.tensor([scheduler.config.num_train_timesteps - 1], device=device, dtype=torch.long)
-    else:
-        grid = torch.linspace(0, scheduler.config.num_train_timesteps - 1, steps=steps, device=device).round().long()
-        grid = torch.flip(grid, dims=[0])
-    sigma_max = sigma_from_scheduler(scheduler, grid[:1]).item()
-    x = torch.randn(num_samples, channels, image_size, image_size, device=device) * sigma_max
-    for idx, t_value in enumerate(grid):
-        t = torch.full((num_samples,), int(t_value.item()), device=device, dtype=torch.long)
-        sigma = sigma_from_scheduler(scheduler, t)
+    sigma_max = getattr(model, "sigma_max", None)
+    sigma_min = getattr(model, "sigma_min", 0.002)
+    rho = getattr(model, "bins_rho", 7.0)
+    num_points = max(steps, 1)
+    grid = sigma_schedule(num_points, sigma_min, sigma_max or 80.0, rho, device)
+    x = torch.randn(num_samples, channels, image_size, image_size, device=device) * grid[:1].item()
+    for idx, sigma_value in enumerate(grid):
+        sigma = torch.full((num_samples,), float(sigma_value.item()), device=device, dtype=torch.float32)
         x = model(x, sigma)
         if idx < len(grid) - 1:
-            next_t = torch.full((num_samples,), int(grid[idx + 1].item()), device=device, dtype=torch.long)
-            next_sigma = sigma_from_scheduler(scheduler, next_t)
-            x = x + next_sigma[:, None, None, None] * torch.randn_like(x)
+            next_sigma = grid[idx + 1].item()
+            noise_scale = max(next_sigma**2 - sigma_min**2, 0.0) ** 0.5
+            x = x + noise_scale * torch.randn_like(x)
     return x.clamp(-1.0, 1.0)
 
 
@@ -174,13 +192,26 @@ def train(config: DistillConfig) -> None:
         config.layers_per_block,
         config.attention_levels,
     ).to(device)
-    student = ConsistencyModel(student_unet, sigma_data=config.sigma_data).to(device)
+    student = ConsistencyModel(
+        student_unet,
+        sigma_data=config.sigma_data,
+        sigma_min=config.sigma_min,
+    ).to(device)
+    student.sigma_max = config.sigma_max
+    student.bins_rho = config.bins_rho
     ema_student = clone_model(student).eval().to(device)
     ema_student.requires_grad_(False)
     if world_size > 1:
         student = DDP(student, device_ids=[device.index], output_device=device.index)
 
     optimizer = AdamW(unwrap_model(student).parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    loss_fn = ConsistencyLoss(
+        config.loss_type,
+        lpips_net=config.lpips_net,
+        lpips_weight=config.lpips_weight,
+        l1_weight=config.l1_weight,
+        l2_weight=config.l2_weight,
+    ).to(device)
     scaler = make_grad_scaler(enabled=(config.use_amp and device.type == "cuda"))
     total_steps = config.epochs * len(dataloader)
     global_step = 0
@@ -193,33 +224,35 @@ def train(config: DistillConfig) -> None:
         progress = tqdm(dataloader, desc=f"Consistency {epoch}/{config.epochs}", leave=False, disable=not is_main_process())
         for batch in progress:
             batch = batch.to(device, non_blocking=True)
-            bins = get_bins(global_step, total_steps, config.bins_min, config.bins_max)
-            s, t = make_timestep_pairs(batch.shape[0], config.num_train_timesteps, bins, device)
+            bins = get_bins(global_step, total_steps, config.bins_min, config.bins_max, config.bins_schedule)
+            sigma_s, sigma_t = make_sigma_pairs(
+                batch.shape[0],
+                bins,
+                config.sigma_min,
+                config.sigma_max,
+                config.bins_rho,
+                device,
+            )
             noise = torch.randn_like(batch)
-
+            t = sigma_to_timestep(ddim_scheduler, sigma_t).to(device)
             alpha_bar = ddim_scheduler.alphas_cumprod.to(device=device, dtype=batch.dtype)
-            alpha_t = alpha_bar[t].reshape(-1, 1, 1, 1)
+            alpha_t = alpha_bar[t].reshape(-1, 1, 1, 1).clamp_min(1e-8)
             x_t = torch.sqrt(alpha_t) * batch + torch.sqrt(1.0 - alpha_t) * noise
 
             with torch.no_grad():
-                x_s = ddim_step_between(ddim_scheduler, teacher, x_t, t, s)
-                sigma_s = sigma_from_scheduler(ddim_scheduler, s)
+                x_s = ddim_step_between_sigma(ddim_scheduler, teacher, x_t, sigma_t, sigma_s)
                 target = ema_student(x_s, sigma_s)
 
-            sigma_t = sigma_from_scheduler(ddim_scheduler, t)
             optimizer.zero_grad(set_to_none=True)
             with autocast_context(device, enabled=(config.use_amp and device.type == "cuda")):
                 pred = student(x_t, sigma_t)
-                if config.loss_type == "l1":
-                    loss = F.l1_loss(pred, target)
-                else:
-                    loss = F.mse_loss(pred, target)
+                loss = loss_fn(pred, target)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(student.parameters(), config.grad_clip)
             scaler.step(optimizer)
             scaler.update()
-            update_ema(ema_student, student, config.ema_decay)
+            update_ema(ema_student, student, get_ema_decay(global_step, total_steps, bins, config))
 
             running_loss += loss.item()
             global_step += 1
