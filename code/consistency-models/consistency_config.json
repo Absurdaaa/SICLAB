@@ -1,6 +1,6 @@
 {
   "data_dir": "../../data/cifar-10-batches-py",
-  "teacher_checkpoint": "/nfs/tangwenhao/lhp/outputs_teacher/teacher_epoch_0300.pt",
+  "teacher_checkpoint": "/nfs/tangwenhao/lhp/outputs_teacher/checkpoints/teacher_epoch_0300.pt",
   "output_dir": "/nfs/tangwenhao/lhp/outputs_consistency",
   "image_size": 32,
   "in_channels": 3,
