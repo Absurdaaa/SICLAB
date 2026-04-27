@@ -8,13 +8,23 @@ set -euo pipefail
 #   3. cross-attention conditioning
 # If the legacy WORKDIR override is set, treat it as the root directory and
 # place each variant under a separate subdirectory to preserve compatibility.
-WORKDIR_ROOT="${WORKDIR:-}"
-WORKDIR_ADAGN="${WORKDIR_ADAGN:-${WORKDIR_ROOT:+${WORKDIR_ROOT}/adagn}}"
-WORKDIR_CONCAT="${WORKDIR_CONCAT:-${WORKDIR_ROOT:+${WORKDIR_ROOT}/concat}}"
-WORKDIR_CROSS="${WORKDIR_CROSS:-${WORKDIR_ROOT:+${WORKDIR_ROOT}/cross-attn}}"
-WORKDIR_ADAGN="${WORKDIR_ADAGN:-/nfs/tangwenhao/lhp/cd-conditional-student-ft-adagn-true}"
-WORKDIR_CONCAT="${WORKDIR_CONCAT:-/nfs/tangwenhao/lhp/cd-conditional-student-ft-concat}"
-WORKDIR_CROSS="${WORKDIR_CROSS:-/nfs/tangwenhao/lhp/cd-conditional-student-ft-cross-attn}"
+resolve_workdir() {
+  local specific="$1"
+  local suffix="$2"
+  local fallback="$3"
+
+  if [[ -n "${specific}" ]]; then
+    printf '%s\n' "${specific}"
+  elif [[ -n "${WORKDIR:-}" ]]; then
+    printf '%s/%s\n' "${WORKDIR}" "${suffix}"
+  else
+    printf '%s\n' "${fallback}"
+  fi
+}
+
+WORKDIR_ADAGN="$(resolve_workdir "${WORKDIR_ADAGN:-}" "adagn" "/nfs/tangwenhao/lhp/cd-conditional-student-ft-adagn-true")"
+WORKDIR_CONCAT="$(resolve_workdir "${WORKDIR_CONCAT:-}" "concat" "/nfs/tangwenhao/lhp/cd-conditional-student-ft-concat")"
+WORKDIR_CROSS="$(resolve_workdir "${WORKDIR_CROSS:-}" "cross-attn" "/nfs/tangwenhao/lhp/cd-conditional-student-ft-cross-attn")"
 INIT_CKPT="${INIT_CKPT:-/nfs/tangwenhao/lhp/cd-lpips/checkpoints/checkpoint_25}"
 GPUS="${GPUS:-0,1,2,3}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
@@ -45,7 +55,14 @@ run_train() {
   --config.model.num_classes=10
 }
 
-run_train "${WORKDIR_CROSS}" "cross_attn"
-run_train "${WORKDIR_ADAGN}" "adagn"
-run_train "${WORKDIR_CONCAT}" "concat"
+declare -a TRAIN_JOBS=(
+  "${WORKDIR_CROSS}:cross_attn"
+  "${WORKDIR_ADAGN}:adagn"
+  "${WORKDIR_CONCAT}:concat"
+)
 
+for job in "${TRAIN_JOBS[@]}"; do
+  workdir="${job%%:*}"
+  conditioning_type="${job#*:}"
+  run_train "${workdir}" "${conditioning_type}"
+done

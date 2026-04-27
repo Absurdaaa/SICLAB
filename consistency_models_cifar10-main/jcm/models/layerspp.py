@@ -235,6 +235,7 @@ class ResnetBlockDDPMpp(nn.Module):
     init_scale: float = 0.0
     conditioning_type: str = "adagn"
     num_heads: int = 4
+    num_tokens: int = 4
 
     @nn.compact
     def __call__(self, x, temb=None, class_emb=None, train=True):
@@ -259,6 +260,7 @@ class ResnetBlockDDPMpp(nn.Module):
             h = CrossAttention(
                 out_ch=out_ch,
                 num_heads=self.num_heads,
+                num_tokens=self.num_tokens,
                 init_scale=self.init_scale,
                 skip_rescale=False,
             )(h, class_emb, train=train)
@@ -296,6 +298,7 @@ class ResnetBlockBigGANpp(nn.Module):
     init_scale: float = 0.0
     conditioning_type: str = "adagn"
     num_heads: int = 4
+    num_tokens: int = 4
 
     @nn.compact
     def __call__(self, x, temb=None, class_emb=None, train=True):
@@ -335,6 +338,7 @@ class ResnetBlockBigGANpp(nn.Module):
             h = CrossAttention(
                 out_ch=out_ch,
                 num_heads=self.num_heads,
+                num_tokens=self.num_tokens,
                 init_scale=self.init_scale,
                 skip_rescale=False,
             )(h, class_emb, train=train)
