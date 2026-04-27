@@ -4,9 +4,9 @@ python -m jcm.main \
 --config configs/cifar10_ve_cd.py \
 --workdir /nfs/tangwenhao/lhp/cd-lpips \
 --mode eval \
---eval_folder eval_student_40k_1step \
---config.eval.begin_ckpt=21 \
---config.eval.end_ckpt=21 \
+--eval_folder eval_student_50k_1step \
+--config.eval.begin_ckpt=25 \
+--config.eval.end_ckpt=25 \
 --config.eval.num_samples=50000 \
 --config.eval.batch_size=256 \
 --config.eval.enable_loss=False \
@@ -14,20 +14,20 @@ python -m jcm.main \
 --config.eval.enable_sampling=True
 
 # 1step
-fid 5.504918662306181
-torchfid 5.50185727861691
-is_mean 9.159789286154586
-is_std 0.09658235910327317
+# fid 5.504918662306181
+# torchfid 5.50185727861691
+# is_mean 9.159789286154586
+# is_std 0.09658235910327317
 
 CUDA_VISIBLE_DEVICES=0 \
 python -m jcm.main \
 --config configs/cifar10_ve_cd.py \
 --workdir /nfs/tangwenhao/lhp/cd-lpips \
 --mode metrics \
---eval_folder eval_student_40k_1step \
---config.eval.begin_ckpt=21 \
---config.eval.end_ckpt=21 \
---config.eval.batch_size=128 \
+--eval_folder eval_student_50k_1step \
+--config.eval.begin_ckpt=25 \
+--config.eval.end_ckpt=25 \
+--config.eval.batch_size=256 \
 --config.eval.num_samples=50000
 
 # 4step
@@ -60,7 +60,7 @@ python -m jcm.main \
 
 python - <<'PY'
 import numpy as np
-path = "/nfs/tangwenhao/lhp/cd-lpips/eval_student_40k_1step/metrics_21.npz"
+path = "/nfs/tangwenhao/lhp/cd-lpips/eval_student_50k_1step/metrics_25.npz"
 data = np.load(path)
 print(data.files)
 for k in data.files:
@@ -69,6 +69,10 @@ PY
 
 
 ## teacher
+fid 2.0681136895769896
+torchfid 2.0688416953433375
+is_mean 9.869182827091864
+is_std 0.13531738533425158
 
 mkdir -p /nfs/tangwenhao/lhp/teacher_eval/checkpoints
 ln -sf /tangwenhao/lhp/SICLAB/consistency_models_cifar10-main/checkpoints/edm_cifar10_ema /nfs/tangwenhao/lhp/teacher_eval/checkpoints/checkpoint_1
@@ -85,7 +89,9 @@ python -m jcm.main \
 --config.eval.batch_size=128 \
 --config.eval.enable_loss=False \
 --config.eval.enable_bpd=False \
---config.eval.enable_sampling=True
+--config.eval.enable_sampling=True \
+--config.eval.save_meta_every=8 \
+--config.eval.aggregate_samples=False
 
 CUDA_VISIBLE_DEVICES=0 \
 python -m jcm.main \
@@ -93,8 +99,8 @@ python -m jcm.main \
 --workdir /nfs/tangwenhao/lhp/teacher_eval \
 --mode metrics \
 --eval_folder eval_teacher \
---config.eval.begin_ckpt=21 \
---config.eval.end_ckpt=21 \
+--config.eval.begin_ckpt=1 \
+--config.eval.end_ckpt=1 \
 --config.eval.batch_size=128 \
 --config.eval.num_samples=50000
 
