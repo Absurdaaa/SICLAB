@@ -87,6 +87,54 @@ class AdaGN(nn.Module):
         return h
 
 
+class CrossAttention(nn.Module):
+    """Cross-attention from spatial image features to conditioning tokens."""
+
+    out_ch: int
+    num_heads: int = 4
+    num_tokens: int = 4
+    init_scale: float = 0.0
+    skip_rescale: bool = True
+
+    @nn.compact
+    def __call__(self, x, cond, train=True):
+        if cond is None:
+            return x
+
+        b, h, w, c = x.shape
+        h_in = nn.GroupNorm(num_groups=min(c // 4, 32))(x)
+        q = jnp.reshape(h_in, (b, h * w, c))
+        if cond.ndim == 2:
+            kv = nn.Dense(
+                self.num_tokens * c,
+                kernel_init=default_init(),
+            )(nn.swish(cond))
+            kv = jnp.reshape(kv, (b, self.num_tokens, c))
+        elif cond.ndim == 3:
+            kv = cond
+            if kv.shape[-1] != c:
+                kv = nn.Dense(c, kernel_init=default_init())(kv)
+        else:
+            raise ValueError(f"Unsupported conditioning rank {cond.ndim}.")
+
+        attn = nn.MultiHeadDotProductAttention(
+            num_heads=self.num_heads,
+            qkv_features=c,
+            out_features=self.out_ch,
+            kernel_init=default_init(),
+            out_kernel_init=default_init(self.init_scale),
+            use_bias=True,
+            dropout_rate=0.0,
+        )
+        h_out = attn(q, kv, deterministic=not train)
+        h_out = jnp.reshape(h_out, (b, h, w, self.out_ch))
+        if self.out_ch != c:
+            x = conv1x1(x, self.out_ch)
+        if not self.skip_rescale:
+            return x + h_out
+        return (x + h_out) / np.sqrt(2.0)
+
+
 class AttnBlockpp(nn.Module):
     """Channel-wise self-attention block. Modified from DDPM."""
 
@@ -185,13 +233,19 @@ class ResnetBlockDDPMpp(nn.Module):
     dropout: float = 0.1
     skip_rescale: bool = False
     init_scale: float = 0.0
+    conditioning_type: str = "adagn"
+    num_heads: int = 4
 
     @nn.compact
     def __call__(self, x, temb=None, class_emb=None, train=True):
         B, H, W, C = x.shape
         out_ch = self.out_ch if self.out_ch else C
-        h = AdaGN(out_ch=out_ch)(x, class_emb)
-        h = self.act(h)
+        conditioning_type = self.conditioning_type.lower()
+        if conditioning_type == "adagn":
+            h = AdaGN(out_ch=out_ch)(x, class_emb)
+            h = self.act(h)
+        else:
+            h = self.act(nn.GroupNorm(num_groups=min(x.shape[-1] // 4, 32))(x))
         h = conv3x3(h, out_ch)
 
         # Keep the original time-conditioning path so pretrained checkpoints
@@ -201,8 +255,19 @@ class ResnetBlockDDPMpp(nn.Module):
                 :, None, None, :
             ]
 
-        h = AdaGN(out_ch=out_ch)(h, class_emb)
-        h = self.act(h)
+        if conditioning_type == "cross_attn" and class_emb is not None:
+            h = CrossAttention(
+                out_ch=out_ch,
+                num_heads=self.num_heads,
+                init_scale=self.init_scale,
+                skip_rescale=False,
+            )(h, class_emb, train=train)
+            h = self.act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
+        elif conditioning_type == "adagn":
+            h = AdaGN(out_ch=out_ch)(h, class_emb)
+            h = self.act(h)
+        else:
+            h = self.act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
         h = nn.Dropout(self.dropout)(h, deterministic=not train)
         h = conv3x3(h, out_ch, init_scale=self.init_scale)
         if C != out_ch:
@@ -229,13 +294,19 @@ class ResnetBlockBigGANpp(nn.Module):
     fir_kernel: Tuple[int] = (1, 3, 3, 1)
     skip_rescale: bool = True
     init_scale: float = 0.0
+    conditioning_type: str = "adagn"
+    num_heads: int = 4
 
     @nn.compact
     def __call__(self, x, temb=None, class_emb=None, train=True):
         B, H, W, C = x.shape
         out_ch = self.out_ch if self.out_ch else C
-        h = AdaGN(out_ch=out_ch)(x, class_emb)
-        h = self.act(h)
+        conditioning_type = self.conditioning_type.lower()
+        if conditioning_type == "adagn":
+            h = AdaGN(out_ch=out_ch)(x, class_emb)
+            h = self.act(h)
+        else:
+            h = self.act(nn.GroupNorm(num_groups=min(x.shape[-1] // 4, 32))(x))
 
         if self.up:
             if self.fir:
@@ -260,8 +331,19 @@ class ResnetBlockBigGANpp(nn.Module):
                 :, None, None, :
             ]
 
-        h = AdaGN(out_ch=out_ch)(h, class_emb)
-        h = self.act(h)
+        if conditioning_type == "cross_attn" and class_emb is not None:
+            h = CrossAttention(
+                out_ch=out_ch,
+                num_heads=self.num_heads,
+                init_scale=self.init_scale,
+                skip_rescale=False,
+            )(h, class_emb, train=train)
+            h = self.act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
+        elif conditioning_type == "adagn":
+            h = AdaGN(out_ch=out_ch)(h, class_emb)
+            h = self.act(h)
+        else:
+            h = self.act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
         h = nn.Dropout(self.dropout)(h, deterministic=not train)
         h = conv3x3(h, out_ch, init_scale=self.init_scale)
         if C != out_ch or self.up or self.down:

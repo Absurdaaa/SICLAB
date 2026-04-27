@@ -62,6 +62,8 @@ def get_default_configs():
     model.double_heads = False
     model.class_conditional = False
     model.conditioning_type = "adagn"
+    model.conditioning_num_heads = 4
+    model.conditioning_num_tokens = 4
     model.num_classes = 10
 
     # optimization

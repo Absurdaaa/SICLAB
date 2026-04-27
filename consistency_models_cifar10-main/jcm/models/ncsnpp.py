@@ -66,11 +66,15 @@ class NCSNpp(nn.Module):
         conditioning_type = str(
             getattr(config.model, "conditioning_type", "adagn")
         ).lower()
+        conditioning_num_heads = int(getattr(config.model, "conditioning_num_heads", 4))
+        conditioning_num_tokens = int(
+            getattr(config.model, "conditioning_num_tokens", 4)
+        )
         num_classes = int(getattr(config.model, "num_classes", 10))
         assert progressive in ["none", "output_skip", "residual"]
         assert progressive_input in ["none", "input_skip", "residual"]
         assert embedding_type in ["fourier", "positional"]
-        assert conditioning_type in ["adagn", "concat"]
+        assert conditioning_type in ["adagn", "concat", "cross_attn"]
         combine_method = config.model.progressive_combine.lower()
         combiner = functools.partial(Combine, method=combine_method)
 
@@ -84,7 +88,10 @@ class NCSNpp(nn.Module):
                 class_map, (x.shape[0], x.shape[1], x.shape[2], num_classes)
             )
             x = jnp.concatenate([x, class_map], axis=-1)
-        elif class_conditional and class_labels is not None and conditioning_type == "adagn":
+        elif class_conditional and class_labels is not None and conditioning_type in (
+            "adagn",
+            "cross_attn",
+        ):
             class_emb = nn.Embed(
                 num_embeddings=num_classes,
                 features=nf * 4,
@@ -153,6 +160,9 @@ class NCSNpp(nn.Module):
                 dropout=dropout,
                 init_scale=init_scale,
                 skip_rescale=skip_rescale,
+                conditioning_type=conditioning_type,
+                num_heads=conditioning_num_heads,
+                num_tokens=conditioning_num_tokens,
             )
 
         elif resblock_type == "biggan":
@@ -164,6 +174,9 @@ class NCSNpp(nn.Module):
                 fir_kernel=fir_kernel,
                 init_scale=init_scale,
                 skip_rescale=skip_rescale,
+                conditioning_type=conditioning_type,
+                num_heads=conditioning_num_heads,
+                num_tokens=conditioning_num_tokens,
             )
 
         else:
