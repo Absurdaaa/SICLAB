@@ -58,6 +58,7 @@ def get_default_configs():
     model.embedding_type = "fourier"
     model.double_heads = False
     model.class_conditional = False
+    model.conditioning_type = "adagn"
     model.num_classes = 10
 
     # optimization

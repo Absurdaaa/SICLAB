@@ -18,6 +18,7 @@
 from . import utils, layers, layerspp, normalization
 import flax.linen as nn
 import functools
+import jax
 import jax.numpy as jnp
 import numpy as np
 import ml_collections
@@ -62,12 +63,26 @@ class NCSNpp(nn.Module):
         embedding_type = config.model.embedding_type.lower()
         init_scale = config.model.init_scale
         class_conditional = bool(getattr(config.model, "class_conditional", False))
+        conditioning_type = str(
+            getattr(config.model, "conditioning_type", "adagn")
+        ).lower()
         num_classes = int(getattr(config.model, "num_classes", 10))
         assert progressive in ["none", "output_skip", "residual"]
         assert progressive_input in ["none", "input_skip", "residual"]
         assert embedding_type in ["fourier", "positional"]
+        assert conditioning_type in ["adagn", "concat"]
         combine_method = config.model.progressive_combine.lower()
         combiner = functools.partial(Combine, method=combine_method)
+
+        if class_conditional and class_labels is not None and conditioning_type == "concat":
+            class_map = jax.nn.one_hot(
+                class_labels.astype(jnp.int32), num_classes, dtype=x.dtype
+            )
+            class_map = class_map[:, None, None, :]
+            class_map = jnp.broadcast_to(
+                class_map, (x.shape[0], x.shape[1], x.shape[2], num_classes)
+            )
+            x = jnp.concatenate([x, class_map], axis=-1)
 
         # timestep/noise_level embedding; only for continuous training
         if embedding_type == "fourier":
@@ -88,7 +103,12 @@ class NCSNpp(nn.Module):
         else:
             temb = None
 
-        if class_conditional and temb is not None and class_labels is not None:
+        if (
+            class_conditional
+            and conditioning_type == "adagn"
+            and temb is not None
+            and class_labels is not None
+        ):
             class_emb = nn.Embed(
                 num_embeddings=num_classes,
                 features=nf * 4,
