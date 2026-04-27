@@ -41,6 +41,37 @@ from . import sde_lib
 import blobfile
 
 
+def _merge_compatible_tree(new_tree, old_tree):
+    if isinstance(new_tree, dict) and isinstance(old_tree, dict):
+        merged = dict(new_tree)
+        for key, value in new_tree.items():
+            if key in old_tree:
+                merged[key] = _merge_compatible_tree(value, old_tree[key])
+        return merged
+
+    new_shape = getattr(new_tree, "shape", None)
+    old_shape = getattr(old_tree, "shape", None)
+    if new_shape is not None and old_shape is not None and new_shape == old_shape:
+        return old_tree
+    return new_tree
+
+
+def _maybe_initialize_from_checkpoint(state, init_ckpt):
+    if not init_ckpt:
+        return state
+
+    raw_state = checkpoints.restore_checkpoint(init_ckpt, None)
+    if raw_state is None:
+        raise ValueError(f"Init checkpoint not found: {init_ckpt}")
+
+    state_dict = flax.serialization.to_state_dict(state)
+    for field in ("params", "params_ema", "target_params", "model_state"):
+        if field in raw_state and field in state_dict:
+            state_dict[field] = _merge_compatible_tree(state_dict[field], raw_state[field])
+
+    return flax.serialization.from_state_dict(state, state_dict)
+
+
 def train(config, workdir):
     """Runs the training pipeline.
 
@@ -127,6 +158,8 @@ def train(config, workdir):
     blobfile.makedirs(checkpoint_meta_dir)
     # Resume training when intermediate checkpoints are detected
     state = checkpoints.restore_checkpoint(checkpoint_meta_dir, state)
+    if int(state.step) == 0 and getattr(config.training, "init_ckpt", ""):
+        state = _maybe_initialize_from_checkpoint(state, config.training.init_ckpt)
     # `state.step` is JAX integer on the GPU/TPU devices
     initial_step = int(state.step)
     rng.replace_internal_state(state.rng_state)

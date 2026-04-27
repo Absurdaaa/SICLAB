@@ -39,7 +39,7 @@ class NCSNpp(nn.Module):
     config: ml_collections.ConfigDict
 
     @nn.compact
-    def __call__(self, x, time_cond, train=True):
+    def __call__(self, x, time_cond, class_labels=None, train=True):
         # config parsing
         config = self.config
         act = get_act(config)
@@ -61,6 +61,8 @@ class NCSNpp(nn.Module):
         progressive_input = config.model.progressive_input.lower()
         embedding_type = config.model.embedding_type.lower()
         init_scale = config.model.init_scale
+        class_conditional = bool(getattr(config.model, "class_conditional", False))
+        num_classes = int(getattr(config.model, "num_classes", 10))
         assert progressive in ["none", "output_skip", "residual"]
         assert progressive_input in ["none", "input_skip", "residual"]
         assert embedding_type in ["fourier", "positional"]
@@ -85,6 +87,14 @@ class NCSNpp(nn.Module):
             temb = nn.Dense(nf * 4, kernel_init=default_initializer())(act(temb))
         else:
             temb = None
+
+        if class_conditional and temb is not None and class_labels is not None:
+            class_emb = nn.Embed(
+                num_embeddings=num_classes,
+                features=nf * 4,
+                embedding_init=default_initializer(),
+            )(class_labels.astype(jnp.int32))
+            temb = temb + class_emb
 
         AttnBlock = functools.partial(
             layerspp.AttnBlockpp, init_scale=init_scale, skip_rescale=skip_rescale
@@ -264,8 +274,10 @@ class JointNCSNpp(nn.Module):
     config: ml_collections.ConfigDict
 
     @nn.compact
-    def __call__(self, x, time_cond, train=True):
+    def __call__(self, x, time_cond, class_labels=None, train=True):
         # config parsing
         denoiser = NCSNpp(config=self.config)
         distiller = NCSNpp(config=self.config)
-        return denoiser(x, time_cond, train), distiller(x, time_cond, train)
+        return denoiser(x, time_cond, class_labels, train), distiller(
+            x, time_cond, class_labels, train
+        )

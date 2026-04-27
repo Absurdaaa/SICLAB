@@ -16,6 +16,7 @@ def get_default_configs():
     training.snapshot_sampling = True
     training.likelihood_weighting = False
     training.n_jitted_steps = 5  # TODO: important flag!
+    training.init_ckpt = ""
 
     # sampling
     config.sampling = sampling = ml_collections.ConfigDict()
@@ -23,6 +24,7 @@ def get_default_configs():
     sampling.noise_removal = True
     sampling.probability_flow = False
     sampling.snr = 0.16
+    sampling.class_label = None
 
     # evaluation
     config.eval = evaluate = ml_collections.ConfigDict()
@@ -55,6 +57,8 @@ def get_default_configs():
     model.dropout = 0.1
     model.embedding_type = "fourier"
     model.double_heads = False
+    model.class_conditional = False
+    model.num_classes = 10
 
     # optimization
     config.optim = optim = ml_collections.ConfigDict()

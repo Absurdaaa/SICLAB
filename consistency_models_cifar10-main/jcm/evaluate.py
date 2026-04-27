@@ -55,6 +55,8 @@ def evaluate(config, workdir, eval_folder="eval"):
     # Create directory to eval_folder
     eval_dir = os.path.join(workdir, eval_folder)
     blobfile.makedirs(eval_dir)
+    save_meta_every = max(int(getattr(config.eval, "save_meta_every", 1)), 1)
+    aggregate_samples = bool(getattr(config.eval, "aggregate_samples", False))
 
     rng = hk.PRNGSequence(config.seed + 1)
     # Initialize model
@@ -358,11 +360,11 @@ def evaluate(config, workdir, eval_folder="eval"):
                     "wb",
                 ) as fout:
                     io_buffer = io.BytesIO()
-                    np.savez_compressed(io_buffer, samples=samples)
+                    np.savez(io_buffer, samples=samples)
                     fout.write(io_buffer.getvalue())
 
                 # Save image samples and submit to the FID evaluation website
-                if r == num_sampling_rounds - 1:
+                if aggregate_samples and r == num_sampling_rounds - 1:
                     # Collect samples from all hosts and sampling rounds
                     if jax.process_index() == 0:
                         all_samples = get_samples_from_ckpt(eval_dir, ckpt)
@@ -370,7 +372,7 @@ def evaluate(config, workdir, eval_folder="eval"):
                     sample_path = os.path.join(eval_dir, f"ckpt_{ckpt}_samples.npz")
                     with blobfile.BlobFile(sample_path, "wb") as fout:
                         io_buffer = io.BytesIO()
-                        np.savez_compressed(io_buffer, all_samples)
+                        np.savez(io_buffer, all_samples)
                         fout.write(io_buffer.getvalue())
 
                 # Update the intermediate evaluation state
@@ -378,15 +380,16 @@ def evaluate(config, workdir, eval_folder="eval"):
                     ckpt_id=ckpt, sampling_round_id=r, rng_state=rng.internal_state
                 )
                 # Save intermediate states to resume evaluation after pre-emption
-                checkpoints.save_checkpoint(
-                    eval_dir,
-                    eval_meta,
-                    step=ckpt * (num_sampling_rounds + num_bpd_rounds)
-                    + r
-                    + num_bpd_rounds,
-                    keep=1,
-                    prefix=f"meta_{jax.process_index()}_",
-                )
+                if (r + 1) % save_meta_every == 0 or r == num_sampling_rounds - 1:
+                    checkpoints.save_checkpoint(
+                        eval_dir,
+                        eval_meta,
+                        step=ckpt * (num_sampling_rounds + num_bpd_rounds)
+                        + r
+                        + num_bpd_rounds,
+                        keep=1,
+                        prefix=f"meta_{jax.process_index()}_",
+                    )
 
         else:
             # Skip sampling and save intermediate evaluation states for pre-emption

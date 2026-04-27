@@ -28,6 +28,10 @@ from jcm import sde_lib
 import numpy as np
 
 
+def _get_class_labels(batch):
+    return batch["label"] if "label" in batch else None
+
+
 def get_optimizer(config):
     """Returns a flax optimizer object based on `config`."""
     if config.optim.optimizer.lower() == "adam":
@@ -302,6 +306,7 @@ def get_consistency_loss_fn(
     def loss_fn(rng, params, states, batch, target_params=None, num_scales=None):
         rng = hk.PRNGSequence(rng)
         x = batch["image"]
+        class_labels = _get_class_labels(batch)
         if target_params is None:
             target_params = params
 
@@ -323,12 +328,24 @@ def get_consistency_loss_fn(
         x_t = x + batch_mul(t, z)
         dropout_rng = next(rng)
         Ft, new_states = mutils.get_distiller_fn(
-            sde, model, params, states, train=train, return_state=True
+            sde,
+            model,
+            params,
+            states,
+            train=train,
+            return_state=True,
+            class_labels=class_labels,
         )(x_t, t, rng=dropout_rng if train else None)
 
         x_t2 = ode_solver(x_t, t, t2, x)
         Ft2, new_states = mutils.get_distiller_fn(
-            sde, model, target_params, new_states, train=train, return_state=True
+            sde,
+            model,
+            target_params,
+            new_states,
+            train=train,
+            return_state=True,
+            class_labels=class_labels,
         )(x_t2, t2, rng=dropout_rng if train else None)
 
         if stopgrad:
@@ -397,6 +414,7 @@ def get_progressive_distillation_loss_fn(
     def loss_fn(rng, params, states, batch, target_params, num_scales):
         rng = hk.PRNGSequence(rng)
         x = batch["image"]
+        class_labels = _get_class_labels(batch)
 
         indices = jax.random.randint(next(rng), (x.shape[0],), 0, num_scales)
         t = sde.t_max ** (1 / sde.rho) + indices / num_scales * (
@@ -419,7 +437,13 @@ def get_progressive_distillation_loss_fn(
 
         dropout_rng = next(rng)
         denoised_x, new_states = mutils.get_denoiser_fn(
-            sde, model, params, states, train=train, return_state=True
+            sde,
+            model,
+            params,
+            states,
+            train=train,
+            return_state=True,
+            class_labels=class_labels,
         )(x_t, t, rng=dropout_rng if train else None)
 
         target_denoiser_fn = mutils.get_denoiser_fn(
@@ -429,6 +453,7 @@ def get_progressive_distillation_loss_fn(
             states,
             train=False,
             return_state=False,
+            class_labels=class_labels,
         )
 
         def euler_solver(samples, t, next_t):
@@ -501,18 +526,20 @@ def get_continuous_consistency_loss_fn(
     dsm_target=False,
 ):
     assert isinstance(sde, sde_lib.KVESDE), "Only KVE SDEs are supported for now."
-    score_fn = mutils.get_score_fn(
-        sde,
-        ref_model,
-        ref_params,
-        ref_states,
-        train=False,
-        return_state=False,
-    )
 
     def loss_fn(rng, params, states, batch):
         rng = hk.PRNGSequence(rng)
         x = batch["image"]
+        class_labels = _get_class_labels(batch)
+        score_fn = mutils.get_score_fn(
+            sde,
+            ref_model,
+            ref_params,
+            ref_states,
+            train=False,
+            return_state=False,
+            class_labels=class_labels,
+        )
 
         # sampling t according to the Heun sampler
         t = jax.random.uniform(
@@ -538,7 +565,13 @@ def get_continuous_consistency_loss_fn(
 
         def model_fn(data, time):
             return mutils.get_distiller_fn(
-                sde, model, params, states, train=train, return_state=True
+                sde,
+                model,
+                params,
+                states,
+                train=train,
+                return_state=True,
+                class_labels=class_labels,
             )(data, time, rng=step_rng)
 
         Ft, diffs, new_states = jax.jvp(
@@ -698,6 +731,7 @@ def get_score_matching_loss_fn(
         """
 
         data = batch["image"]
+        class_labels = _get_class_labels(batch)
         rng = hk.PRNGSequence(rng)
 
         if isinstance(sde, sde_lib.KVESDE):
@@ -718,6 +752,7 @@ def get_score_matching_loss_fn(
                 states,
                 train=train,
                 return_state=True,
+                class_labels=class_labels,
             )
             score, new_model_state = score_fn(perturbed_data, t, rng=next(rng))
 
@@ -735,6 +770,7 @@ def get_score_matching_loss_fn(
                 states,
                 train=train,
                 return_state=True,
+                class_labels=class_labels,
             )
 
             score, new_model_state = score_fn(perturbed_data, t, rng=next(rng))

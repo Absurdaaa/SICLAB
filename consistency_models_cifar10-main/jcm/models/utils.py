@@ -96,9 +96,17 @@ def init_model(rng, config):
     fake_input = jnp.zeros(input_shape)
     fake_label = jnp.zeros(label_shape, dtype=jnp.int32)
     model = model_def()
-    variables = model.init(
-        {"params": next(rng), "dropout": next(rng)}, fake_input, fake_label
-    )
+    if bool(getattr(config.model, "class_conditional", False)):
+        variables = model.init(
+            {"params": next(rng), "dropout": next(rng)},
+            fake_input,
+            fake_label,
+            class_labels=fake_label,
+        )
+    else:
+        variables = model.init(
+            {"params": next(rng), "dropout": next(rng)}, fake_input, fake_label
+        )
     # Newer Flax versions may return either dict-like or FrozenDict variables.
     variables = flax.core.unfreeze(variables)
     initial_params = flax.core.freeze(variables.pop("params"))
@@ -128,7 +136,7 @@ def get_model_fn(model, params, states, train=False):
       A model function.
     """
 
-    def model_fn(x, labels, rng=None):
+    def model_fn(x, labels, rng=None, class_labels=None):
         """Compute the output of the score-based model.
 
         Args:
@@ -142,26 +150,61 @@ def get_model_fn(model, params, states, train=False):
         """
         variables = {"params": params, **states}
         if not train:
-            return model.apply(variables, x, labels, train=False, mutable=False), states
+            if class_labels is None:
+                return (
+                    model.apply(variables, x, labels, train=False, mutable=False),
+                    states,
+                )
+            return (
+                model.apply(
+                    variables,
+                    x,
+                    labels,
+                    class_labels=class_labels,
+                    train=False,
+                    mutable=False,
+                ),
+                states,
+            )
         else:
             rngs = {"dropout": rng}
+            if class_labels is None:
+                return model.apply(
+                    variables,
+                    x,
+                    labels,
+                    train=True,
+                    mutable=list(states.keys()),
+                    rngs=rngs,
+                )
             return model.apply(
-                variables, x, labels, train=True, mutable=list(states.keys()), rngs=rngs
+                variables,
+                x,
+                labels,
+                class_labels=class_labels,
+                train=True,
+                mutable=list(states.keys()),
+                rngs=rngs,
             )
 
     return model_fn
 
 
-def get_denoiser_fn(sde, model, params, states, train=False, return_state=False):
+def get_denoiser_fn(
+    sde, model, params, states, train=False, return_state=False, class_labels=None
+):
     model_fn = get_model_fn(model, params, states, train=train)
     assert isinstance(
         sde, sde_lib.KVESDE
     ), "Only KVE SDE is supported for building the denoiser"
 
-    def denoiser_fn(x, t, rng=None):
+    def denoiser_fn(x, t, rng=None, class_labels_override=None):
         in_x = batch_mul(x, 1 / jnp.sqrt(t**2 + sde.data_std**2))
         cond_t = 0.25 * jnp.log(t)
-        denoiser, state = model_fn(in_x, cond_t, rng)
+        labels = (
+            class_labels if class_labels_override is None else class_labels_override
+        )
+        denoiser, state = model_fn(in_x, cond_t, rng, class_labels=labels)
         denoiser = batch_mul(
             denoiser, t * sde.data_std / jnp.sqrt(t**2 + sde.data_std**2)
         )
@@ -177,7 +220,14 @@ def get_denoiser_fn(sde, model, params, states, train=False, return_state=False)
 
 
 def get_distiller_fn(
-    sde, model, params, states, train=False, return_state=False, pred_t=None
+    sde,
+    model,
+    params,
+    states,
+    train=False,
+    return_state=False,
+    pred_t=None,
+    class_labels=None,
 ):
     assert isinstance(
         sde, sde_lib.KVESDE
@@ -187,10 +237,13 @@ def get_distiller_fn(
     if pred_t is None:
         pred_t = sde.t_min
 
-    def distiller_fn(x, t, rng=None):
+    def distiller_fn(x, t, rng=None, class_labels_override=None):
         in_x = batch_mul(x, 1 / jnp.sqrt(t**2 + sde.data_std**2))
         cond_t = 0.25 * jnp.log(t)
-        denoiser, state = model_fn(in_x, cond_t, rng)
+        labels = (
+            class_labels if class_labels_override is None else class_labels_override
+        )
+        denoiser, state = model_fn(in_x, cond_t, rng, class_labels=labels)
         denoiser = batch_mul(
             denoiser,
             (t - pred_t) * sde.data_std / jnp.sqrt(t**2 + sde.data_std**2),
@@ -209,7 +262,14 @@ def get_distiller_fn(
 
 
 def get_gaussianizer_fn(
-    sde, model, params, states, train=False, return_state=False, pred_t=None
+    sde,
+    model,
+    params,
+    states,
+    train=False,
+    return_state=False,
+    pred_t=None,
+    class_labels=None,
 ):
     assert isinstance(
         sde, sde_lib.KVESDE
@@ -219,10 +279,13 @@ def get_gaussianizer_fn(
     if pred_t is None:
         pred_t = sde.t_min
 
-    def gaussianizer_fn(x, t, rng=None):
+    def gaussianizer_fn(x, t, rng=None, class_labels_override=None):
         in_x = x / sde.data_std
         cond_t = 0.25 * jnp.log(t)
-        model_output, state = model_fn(in_x, cond_t, rng)
+        labels = (
+            class_labels if class_labels_override is None else class_labels_override
+        )
+        model_output, state = model_fn(in_x, cond_t, rng, class_labels=labels)
         model_output = x + batch_mul(model_output, t - pred_t)
 
         if return_state:
@@ -233,7 +296,9 @@ def get_gaussianizer_fn(
     return gaussianizer_fn
 
 
-def get_score_fn(sde, model, params, states, train=False, return_state=False):
+def get_score_fn(
+    sde, model, params, states, train=False, return_state=False, class_labels=None
+):
     """Wraps `score_fn` so that the model output corresponds to a real time-dependent score function.
 
     Args:
@@ -251,13 +316,18 @@ def get_score_fn(sde, model, params, states, train=False, return_state=False):
 
     if isinstance(sde, sde_lib.VPSDE) or isinstance(sde, sde_lib.subVPSDE):
 
-        def score_fn(x, t, rng=None):
+        def score_fn(x, t, rng=None, class_labels_override=None):
             # Scale neural network output by standard deviation and flip sign
             # For VP-trained models, t=0 corresponds to the lowest noise level
             # The maximum value of time embedding is assumed to 999 for
             # continuously-trained models.
             cond_t = t * 999
-            model, state = model_fn(x, cond_t, rng)
+            labels = (
+                class_labels
+                if class_labels_override is None
+                else class_labels_override
+            )
+            model, state = model_fn(x, cond_t, rng, class_labels=labels)
             std = sde.marginal_prob(jnp.zeros_like(x), t)[1]
             score = batch_mul(-model, 1.0 / std)
             if return_state:
@@ -267,10 +337,15 @@ def get_score_fn(sde, model, params, states, train=False, return_state=False):
 
     elif isinstance(sde, sde_lib.VESDE):
 
-        def score_fn(x, t, rng=None):
+        def score_fn(x, t, rng=None, class_labels_override=None):
             x = 2 * x - 1.0  # assuming x is in [0, 1]
             std = sde.marginal_prob(jnp.zeros_like(x), t)[1]
-            score, state = model_fn(x, jnp.log(std), rng)
+            labels = (
+                class_labels
+                if class_labels_override is None
+                else class_labels_override
+            )
+            score, state = model_fn(x, jnp.log(std), rng, class_labels=labels)
             score = batch_mul(score, 1.0 / std)
             if return_state:
                 return score, state
@@ -279,11 +354,19 @@ def get_score_fn(sde, model, params, states, train=False, return_state=False):
 
     elif isinstance(sde, sde_lib.KVESDE):
         denoiser_fn = get_denoiser_fn(
-            sde, model, params, states, train=train, return_state=True
+            sde,
+            model,
+            params,
+            states,
+            train=train,
+            return_state=True,
+            class_labels=class_labels,
         )
 
-        def score_fn(x, t, rng=None):
-            denoiser, state = denoiser_fn(x, t, rng)
+        def score_fn(x, t, rng=None, class_labels_override=None):
+            denoiser, state = denoiser_fn(
+                x, t, rng, class_labels_override=class_labels_override
+            )
             score = batch_mul(denoiser - x, 1 / t**2)
             if return_state:
                 return score, state
@@ -299,7 +382,14 @@ def get_score_fn(sde, model, params, states, train=False, return_state=False):
 
 
 def get_denoiser_and_distiller_fn(
-    sde, model, params, states, train=False, return_state=False, pred_t=None
+    sde,
+    model,
+    params,
+    states,
+    train=False,
+    return_state=False,
+    pred_t=None,
+    class_labels=None,
 ):
     """Wraps `score_fn` so that the model output corresponds to a real time-dependent score function.
 
@@ -326,15 +416,20 @@ def get_denoiser_and_distiller_fn(
 
     from .ncsnpp import NCSNpp, JointNCSNpp
 
-    def denoiser_distiller_fn(x, t, rng=None):
+    def denoiser_distiller_fn(x, t, rng=None, class_labels_override=None):
         in_x = batch_mul(x, 1 / jnp.sqrt(t**2 + sde.data_std**2))
         cond_t = 0.25 * jnp.log(t)
+        labels = (
+            class_labels if class_labels_override is None else class_labels_override
+        )
         if isinstance(model, NCSNpp):
-            model_output, state = model_fn(in_x, cond_t, rng)
+            model_output, state = model_fn(in_x, cond_t, rng, class_labels=labels)
             denoiser = model_output[..., :3]
             distiller = model_output[..., 3:]
         elif isinstance(model, JointNCSNpp):
-            (denoiser, distiller), state = model_fn(in_x, cond_t, rng)
+            (denoiser, distiller), state = model_fn(
+                in_x, cond_t, rng, class_labels=labels
+            )
 
         denoiser = batch_mul(
             denoiser, t * sde.data_std / jnp.sqrt(t**2 + sde.data_std**2)

@@ -41,6 +41,16 @@ _CORRECTORS = {}
 _PREDICTORS = {}
 
 
+def _get_class_labels(config, rng, batch_size):
+    class_label = getattr(config.sampling, "class_label", None)
+    if class_label is None:
+        return None
+    if class_label == "random":
+        num_classes = int(getattr(config.model, "num_classes", 10))
+        return random.randint(rng, (batch_size,), 0, num_classes)
+    return jnp.full((batch_size,), int(class_label), dtype=jnp.int32)
+
+
 def register_predictor(cls=None, *, name=None):
     """A decorator for registering predictor classes."""
 
@@ -528,6 +538,7 @@ def get_onestep_sampler(config, sde, model, shape):
     def sampler(rng, state):
         rng, step_rng = random.split(rng)
         x = jax.random.normal(step_rng, shape) * config.sampling.std
+        class_labels = _get_class_labels(config, rng, shape[0])
         model_fn = mutils.get_distiller_fn(
             sde,
             model,
@@ -535,6 +546,7 @@ def get_onestep_sampler(config, sde, model, shape):
             state.model_state,
             train=False,
             return_state=False,
+            class_labels=class_labels,
         )
         samples = model_fn(x, jnp.ones((x.shape[0],)) * config.sampling.std)
         return samples, 1
@@ -556,6 +568,7 @@ def get_multistep_sampler(config, sde, model, shape):
     def sampler(rng, state):
         rng = hk.PRNGSequence(rng)
         x = jax.random.normal(next(rng), shape) * sigmas[0]
+        class_labels = _get_class_labels(config, next(rng), shape[0])
         model_fn = mutils.get_distiller_fn(
             sde,
             model,
@@ -563,6 +576,7 @@ def get_multistep_sampler(config, sde, model, shape):
             state.model_state,
             train=False,
             return_state=False,
+            class_labels=class_labels,
         )
 
         def loop_body(i, x):
@@ -587,6 +601,7 @@ def get_seeded_sampler(config, sde, model, shape):
     def sampler(rng, state, init, t):
         rng, step_rng = random.split(rng)
         x = init
+        class_labels = _get_class_labels(config, rng, x.shape[0])
         model_fn = mutils.get_distiller_fn(
             sde,
             model,
@@ -594,6 +609,7 @@ def get_seeded_sampler(config, sde, model, shape):
             state.model_state,
             train=False,
             return_state=False,
+            class_labels=class_labels,
         )
         samples = model_fn(x, jnp.ones((x.shape[0],)) * t)
         return samples, 1
@@ -603,8 +619,14 @@ def get_seeded_sampler(config, sde, model, shape):
 
 def get_heun_sampler(sde, model, shape, denoise=True):
     def heun_sampler(rng, state):
+        class_labels = None
         denoiser_fn = mutils.get_denoiser_fn(
-            sde, model, state.params_ema, state.model_state, train=False
+            sde,
+            model,
+            state.params_ema,
+            state.model_state,
+            train=False,
+            class_labels=class_labels,
         )
 
         rng = hk.PRNGSequence(rng)
@@ -650,8 +672,14 @@ def get_heun_sampler(sde, model, shape, denoise=True):
 
 def get_euler_sampler(sde, model, shape, denoise=True):
     def euler_sampler(rng, state):
+        class_labels = None
         denoiser_fn = mutils.get_denoiser_fn(
-            sde, model, state.params_ema, state.model_state, train=False
+            sde,
+            model,
+            state.params_ema,
+            state.model_state,
+            train=False,
+            class_labels=class_labels,
         )
 
         rng = hk.PRNGSequence(rng)
