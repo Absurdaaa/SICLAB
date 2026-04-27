@@ -74,6 +74,7 @@ class NCSNpp(nn.Module):
         combine_method = config.model.progressive_combine.lower()
         combiner = functools.partial(Combine, method=combine_method)
 
+        class_emb = None
         if class_conditional and class_labels is not None and conditioning_type == "concat":
             class_map = jax.nn.one_hot(
                 class_labels.astype(jnp.int32), num_classes, dtype=x.dtype
@@ -83,6 +84,12 @@ class NCSNpp(nn.Module):
                 class_map, (x.shape[0], x.shape[1], x.shape[2], num_classes)
             )
             x = jnp.concatenate([x, class_map], axis=-1)
+        elif class_conditional and class_labels is not None and conditioning_type == "adagn":
+            class_emb = nn.Embed(
+                num_embeddings=num_classes,
+                features=nf * 4,
+                embedding_init=default_initializer(),
+            )(class_labels.astype(jnp.int32))
 
         # timestep/noise_level embedding; only for continuous training
         if embedding_type == "fourier":
@@ -102,19 +109,6 @@ class NCSNpp(nn.Module):
             temb = nn.Dense(nf * 4, kernel_init=default_initializer())(act(temb))
         else:
             temb = None
-
-        if (
-            class_conditional
-            and conditioning_type == "adagn"
-            and temb is not None
-            and class_labels is not None
-        ):
-            class_emb = nn.Embed(
-                num_embeddings=num_classes,
-                features=nf * 4,
-                embedding_init=default_initializer(),
-            )(class_labels.astype(jnp.int32))
-            temb = temb + class_emb
 
         AttnBlock = functools.partial(
             layerspp.AttnBlockpp, init_scale=init_scale, skip_rescale=skip_rescale
@@ -185,7 +179,9 @@ class NCSNpp(nn.Module):
         for i_level in range(num_resolutions):
             # Residual blocks for this resolution
             for i_block in range(num_res_blocks):
-                h = ResnetBlock(out_ch=nf * ch_mult[i_level])(hs[-1], temb, train)
+                h = ResnetBlock(out_ch=nf * ch_mult[i_level])(
+                    hs[-1], temb, class_emb, train
+                )
                 if h.shape[1] in attn_resolutions:
                     h = AttnBlock()(h)
                 hs.append(h)
@@ -194,7 +190,7 @@ class NCSNpp(nn.Module):
                 if resblock_type == "ddpm":
                     h = Downsample()(hs[-1])
                 else:
-                    h = ResnetBlock(down=True)(hs[-1], temb, train)
+                    h = ResnetBlock(down=True)(hs[-1], temb, class_emb, train)
 
                 if progressive_input == "input_skip":
                     input_pyramid = pyramid_downsample()(input_pyramid)
@@ -215,9 +211,9 @@ class NCSNpp(nn.Module):
                 hs.append(h)
 
         h = hs[-1]
-        h = ResnetBlock()(h, temb, train)
+        h = ResnetBlock()(h, temb, class_emb, train)
         h = AttnBlock()(h)
-        h = ResnetBlock()(h, temb, train)
+        h = ResnetBlock()(h, temb, class_emb, train)
 
         pyramid = None
 
@@ -225,7 +221,7 @@ class NCSNpp(nn.Module):
         for i_level in reversed(range(num_resolutions)):
             for i_block in range(num_res_blocks + 1):
                 h = ResnetBlock(out_ch=nf * ch_mult[i_level])(
-                    jnp.concatenate([h, hs.pop()], axis=-1), temb, train
+                    jnp.concatenate([h, hs.pop()], axis=-1), temb, class_emb, train
                 )
 
             if h.shape[1] in attn_resolutions:
@@ -271,7 +267,7 @@ class NCSNpp(nn.Module):
                 if resblock_type == "ddpm":
                     h = Upsample()(h)
                 else:
-                    h = ResnetBlock(up=True)(h, temb, train)
+                    h = ResnetBlock(up=True)(h, temb, class_emb, train)
 
         assert not hs
 

@@ -62,6 +62,31 @@ class Combine(nn.Module):
             raise ValueError(f"Method {self.method} not recognized.")
 
 
+class AdaGN(nn.Module):
+    """Adaptive GroupNorm with scale/shift conditioning from class embedding.
+
+    The scale and shift are predicted from a conditioning embedding and
+    applied after GroupNorm.
+    """
+
+    out_ch: int
+    num_groups: int = 32
+
+    @nn.compact
+    def __call__(self, x, cond):
+        h = nn.GroupNorm(num_groups=min(x.shape[-1] // 4, self.num_groups))(x)
+        if cond is None:
+            return h
+
+        scale_shift = nn.Dense(
+            2 * self.out_ch,
+            kernel_init=nn.initializers.zeros,
+        )(nn.swish(cond))
+        scale, shift = jnp.split(scale_shift, 2, axis=-1)
+        h = h * (1.0 + scale[:, None, None, :]) + shift[:, None, None, :]
+        return h
+
+
 class AttnBlockpp(nn.Module):
     """Channel-wise self-attention block. Modified from DDPM."""
 
@@ -162,18 +187,22 @@ class ResnetBlockDDPMpp(nn.Module):
     init_scale: float = 0.0
 
     @nn.compact
-    def __call__(self, x, temb=None, train=True):
+    def __call__(self, x, temb=None, class_emb=None, train=True):
         B, H, W, C = x.shape
         out_ch = self.out_ch if self.out_ch else C
-        h = self.act(nn.GroupNorm(num_groups=min(x.shape[-1] // 4, 32))(x))
+        h = AdaGN(out_ch=out_ch)(x, class_emb)
+        h = self.act(h)
         h = conv3x3(h, out_ch)
-        # Add bias to each feature map conditioned on the time embedding
+
+        # Keep the original time-conditioning path so pretrained checkpoints
+        # can still be reused.
         if temb is not None:
             h += nn.Dense(out_ch, kernel_init=default_init())(self.act(temb))[
                 :, None, None, :
             ]
 
-        h = self.act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
+        h = AdaGN(out_ch=out_ch)(h, class_emb)
+        h = self.act(h)
         h = nn.Dropout(self.dropout)(h, deterministic=not train)
         h = conv3x3(h, out_ch, init_scale=self.init_scale)
         if C != out_ch:
@@ -202,10 +231,11 @@ class ResnetBlockBigGANpp(nn.Module):
     init_scale: float = 0.0
 
     @nn.compact
-    def __call__(self, x, temb=None, train=True):
+    def __call__(self, x, temb=None, class_emb=None, train=True):
         B, H, W, C = x.shape
         out_ch = self.out_ch if self.out_ch else C
-        h = self.act(nn.GroupNorm(num_groups=min(x.shape[-1] // 4, 32))(x))
+        h = AdaGN(out_ch=out_ch)(x, class_emb)
+        h = self.act(h)
 
         if self.up:
             if self.fir:
@@ -223,13 +253,15 @@ class ResnetBlockBigGANpp(nn.Module):
                 x = up_or_down_sampling.naive_downsample_2d(x, factor=2)
 
         h = conv3x3(h, out_ch)
-        # Add bias to each feature map conditioned on the time embedding
+
+        # Preserve time conditioning from the original architecture.
         if temb is not None:
             h += nn.Dense(out_ch, kernel_init=default_init())(self.act(temb))[
                 :, None, None, :
             ]
 
-        h = self.act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
+        h = AdaGN(out_ch=out_ch)(h, class_emb)
+        h = self.act(h)
         h = nn.Dropout(self.dropout)(h, deterministic=not train)
         h = conv3x3(h, out_ch, init_scale=self.init_scale)
         if C != out_ch or self.up or self.down:

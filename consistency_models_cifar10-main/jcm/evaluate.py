@@ -57,6 +57,7 @@ def evaluate(config, workdir, eval_folder="eval"):
     blobfile.makedirs(eval_dir)
     save_meta_every = max(int(getattr(config.eval, "save_meta_every", 1)), 1)
     aggregate_samples = bool(getattr(config.eval, "aggregate_samples", False))
+    enable_speed = bool(getattr(config.eval, "enable_speed", True))
 
     rng = hk.PRNGSequence(config.seed + 1)
     # Initialize model
@@ -331,6 +332,8 @@ def evaluate(config, workdir, eval_folder="eval"):
         # Generate samples and compute IS/FID/KID when enabled
         if config.eval.enable_sampling:
             logging.info(f"Start sampling evaluation for ckpt {ckpt}")
+            speed_rounds = []
+            speed_samples = []
             # Run sample generation for multiple rounds to create enough samples
             # Designed to be pre-emption safe. Automatically resumes when interrupted
             for r in range(begin_sampling_round, num_sampling_rounds):
@@ -343,7 +346,24 @@ def evaluate(config, workdir, eval_folder="eval"):
                 )
                 blobfile.makedirs(this_sample_dir)
                 sample_rng = jnp.asarray(rng.take(jax.local_device_count()))
+                round_t0 = time.perf_counter()
                 samples, n = sampling_fn(sample_rng, pstate)
+                samples = jax.tree_util.tree_map(lambda x: x.block_until_ready(), samples)
+                round_elapsed = time.perf_counter() - round_t0
+                round_num_samples = int(np.prod(samples.shape[:-3]))
+                if enable_speed and round_elapsed > 0:
+                    round_speed = round_num_samples / round_elapsed
+                    speed_rounds.append(round_speed)
+                    speed_samples.append(round_num_samples)
+                    logging.info(
+                        "ckpt %d round %d sampling speed: %.2f samples/sec (%.4f sec, %d samples, %d eval steps)",
+                        ckpt,
+                        r,
+                        round_speed,
+                        round_elapsed,
+                        round_num_samples,
+                        int(n),
+                    )
                 samples = (samples + 1.0) / 2.0
                 samples = np.clip(samples * 255.0, 0, 255).astype(np.uint8)
                 samples = samples.reshape(
@@ -390,6 +410,32 @@ def evaluate(config, workdir, eval_folder="eval"):
                         keep=1,
                         prefix=f"meta_{jax.process_index()}_",
                     )
+
+            if enable_speed and speed_rounds and jax.process_index() == 0:
+                total_samples = int(np.sum(np.asarray(speed_samples)))
+                total_time = float(
+                    np.sum(np.asarray(speed_samples, dtype=np.float64)
+                           / np.asarray(speed_rounds, dtype=np.float64))
+                )
+                avg_speed = total_samples / total_time if total_time > 0 else 0.0
+                logging.info(
+                    "ckpt %d average sampling speed: %.2f samples/sec over %d samples",
+                    ckpt,
+                    avg_speed,
+                    total_samples,
+                )
+                with blobfile.BlobFile(
+                    os.path.join(eval_dir, f"ckpt_{ckpt}_speed.npz"), "wb"
+                ) as fout:
+                    io_buffer = io.BytesIO()
+                    np.savez_compressed(
+                        io_buffer,
+                        round_speed=np.asarray(speed_rounds, dtype=np.float32),
+                        round_samples=np.asarray(speed_samples, dtype=np.int32),
+                        avg_speed=np.asarray(avg_speed, dtype=np.float32),
+                        total_samples=np.asarray(total_samples, dtype=np.int64),
+                    )
+                    fout.write(io_buffer.getvalue())
 
         else:
             # Skip sampling and save intermediate evaluation states for pre-emption

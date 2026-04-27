@@ -32,6 +32,9 @@ def get_default_configs():
     evaluate.end_ckpt = 26
     evaluate.batch_size = 512
     evaluate.enable_sampling = True
+    evaluate.enable_speed = True
+    evaluate.save_meta_every = 1
+    evaluate.aggregate_samples = False
     evaluate.num_samples = 50000
     evaluate.enable_loss = True
     evaluate.enable_bpd = False

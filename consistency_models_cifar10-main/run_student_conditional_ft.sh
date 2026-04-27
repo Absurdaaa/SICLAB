@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Teacher-free conditional fine-tuning for a CD student.
-# This initializes the conditional student from an existing unconditional
-# student checkpoint via `training.init_ckpt`, so only compatible weights are
-# loaded and the new class embedding stays randomly initialized.
+# Teacher-free conditional fine-tuning for a CD student with true AdaGN
+# conditioning. This initializes the conditional student from an existing
+# unconditional student checkpoint via `training.init_ckpt`, so only compatible
+# weights are loaded and the new class-conditioned parameters start fresh.
 
-WORKDIR="${WORKDIR:-/nfs/tangwenhao/lhp/cd-conditional-student-ft}"
+WORKDIR="${WORKDIR:-/nfs/tangwenhao/lhp/cd-conditional-student-ft-adagn-true}"
 INIT_CKPT="${INIT_CKPT:-/nfs/tangwenhao/lhp/cd-lpips/checkpoints/checkpoint_25}"
 GPUS="${GPUS:-0,1,2,3}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
@@ -27,4 +27,7 @@ CUDA_VISIBLE_DEVICES="${GPUS}" python -m jcm.main \
   --config.training.log_freq="${LOG_FREQ}" \
   --config.training.eval_freq="${EVAL_FREQ}" \
   --config.training.snapshot_freq="${SNAPSHOT_FREQ}" \
-  --config.training.snapshot_freq_for_preemption="${SNAPSHOT_FREQ}"
+  --config.training.snapshot_freq_for_preemption="${SNAPSHOT_FREQ}" \
+  --config.model.class_conditional=True \
+  --config.model.conditioning_type=adagn \
+  --config.model.num_classes=10
