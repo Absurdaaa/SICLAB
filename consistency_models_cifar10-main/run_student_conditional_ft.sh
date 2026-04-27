@@ -7,7 +7,7 @@ set -euo pipefail
 # loaded and the new class embedding stays randomly initialized.
 
 WORKDIR="${WORKDIR:-/nfs/tangwenhao/lhp/cd-conditional-student-ft}"
-INIT_CKPT="${INIT_CKPT:-/nfs/tangwenhao/lhp/cd-lpips/checkpoints/checkpoint_21}"
+INIT_CKPT="${INIT_CKPT:-/nfs/tangwenhao/lhp/cd-lpips/checkpoints/checkpoint_25}"
 GPUS="${GPUS:-0,1,2,3}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 LR="${LR:-1e-5}"
