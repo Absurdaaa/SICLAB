@@ -44,7 +44,13 @@ def build_classifier(num_classes=10):
 def load_classifier(checkpoint_path: str, device: torch.device):
     payload = torch.load(checkpoint_path, map_location=device)
     model = build_classifier().to(device)
-    model.load_state_dict(payload["model_state"])
+    if isinstance(payload, dict) and "model_state" in payload:
+        state_dict = payload["model_state"]
+    elif isinstance(payload, dict) and "state_dict" in payload:
+        state_dict = payload["state_dict"]
+    else:
+        state_dict = payload
+    model.load_state_dict(state_dict)
     model.eval()
     return model
 
