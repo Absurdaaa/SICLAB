@@ -11,6 +11,7 @@ set -euo pipefail
 WORKDIR="${WORKDIR:-/nfs/tangwenhao/lhp/cd-conditional-student-ft}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/nfs/tangwenhao/lhp/conditional_samples}"
 CONFIG="${CONFIG:-configs/cifar10_student_conditional_ft.py}"
+CONDITIONING_TYPE="${CONDITIONING_TYPE:-adagn}"
 CKPT="${CKPT:-1}"
 NUM_SAMPLES="${NUM_SAMPLES:-5000}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-256}"
@@ -38,6 +39,9 @@ for CLASS_ID in 0 1 2 3 4 5 6 7 8 9; do
     --config.eval.enable_sampling=True \
     --config.eval.save_meta_every="${SAVE_META_EVERY}" \
     --config.eval.aggregate_samples=False \
+    --config.model.class_conditional=True \
+    --config.model.conditioning_type="${CONDITIONING_TYPE}" \
+    --config.model.num_classes=10 \
     --config.sampling.class_label="${CLASS_ID}"
 
   rm -rf "${CLASS_DIR}"

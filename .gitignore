@@ -10,3 +10,5 @@ code/consistency-models/outputs_teacher/
 consistency_models_cifar10-main/checkpoints/
 consistency_models_cifar10-main/wandb/
 consistency_models_cifar10-main/outputs/
+
+报告/

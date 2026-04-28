@@ -74,7 +74,8 @@ class AdaGN(nn.Module):
 
     @nn.compact
     def __call__(self, x, cond):
-        h = nn.GroupNorm(num_groups=min(x.shape[-1] // 4, self.num_groups))(x)
+        num_groups = max(1, min(x.shape[-1] // 4, self.num_groups))
+        h = nn.GroupNorm(num_groups=num_groups)(x)
         if cond is None:
             return h
 
@@ -102,7 +103,7 @@ class CrossAttention(nn.Module):
             return x
 
         b, h, w, c = x.shape
-        h_in = nn.GroupNorm(num_groups=min(c // 4, 32))(x)
+        h_in = nn.GroupNorm(num_groups=max(1, min(c // 4, 32)))(x)
         q = jnp.reshape(h_in, (b, h * w, c))
         if cond.ndim == 2:
             kv = nn.Dense(
@@ -144,7 +145,7 @@ class AttnBlockpp(nn.Module):
     @nn.compact
     def __call__(self, x):
         B, H, W, C = x.shape
-        h = nn.GroupNorm(num_groups=min(x.shape[-1] // 4, 32))(x)
+        h = nn.GroupNorm(num_groups=max(1, min(x.shape[-1] // 4, 32)))(x)
         q = NIN(C)(h)
         k = NIN(C)(h)
         v = NIN(C)(h)
@@ -243,10 +244,14 @@ class ResnetBlockDDPMpp(nn.Module):
         out_ch = self.out_ch if self.out_ch else C
         conditioning_type = self.conditioning_type.lower()
         if conditioning_type == "adagn":
-            h = AdaGN(out_ch=out_ch)(x, class_emb)
+            # The first normalization operates on the input activation, so the
+            # modulation dimensionality must match the current channel count.
+            h = AdaGN(out_ch=C)(x, class_emb)
             h = self.act(h)
         else:
-            h = self.act(nn.GroupNorm(num_groups=min(x.shape[-1] // 4, 32))(x))
+            h = self.act(
+                nn.GroupNorm(num_groups=max(1, min(x.shape[-1] // 4, 32)))(x)
+            )
         h = conv3x3(h, out_ch)
 
         # Keep the original time-conditioning path so pretrained checkpoints
@@ -264,12 +269,16 @@ class ResnetBlockDDPMpp(nn.Module):
                 init_scale=self.init_scale,
                 skip_rescale=False,
             )(h, class_emb, train=train)
-            h = self.act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
+            h = self.act(
+                nn.GroupNorm(num_groups=max(1, min(h.shape[-1] // 4, 32)))(h)
+            )
         elif conditioning_type == "adagn":
             h = AdaGN(out_ch=out_ch)(h, class_emb)
             h = self.act(h)
         else:
-            h = self.act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
+            h = self.act(
+                nn.GroupNorm(num_groups=max(1, min(h.shape[-1] // 4, 32)))(h)
+            )
         h = nn.Dropout(self.dropout)(h, deterministic=not train)
         h = conv3x3(h, out_ch, init_scale=self.init_scale)
         if C != out_ch:
@@ -306,10 +315,14 @@ class ResnetBlockBigGANpp(nn.Module):
         out_ch = self.out_ch if self.out_ch else C
         conditioning_type = self.conditioning_type.lower()
         if conditioning_type == "adagn":
-            h = AdaGN(out_ch=out_ch)(x, class_emb)
+            # Same reason as the DDPM block: the first AdaGN must modulate the
+            # incoming channel count before the block changes dimensionality.
+            h = AdaGN(out_ch=C)(x, class_emb)
             h = self.act(h)
         else:
-            h = self.act(nn.GroupNorm(num_groups=min(x.shape[-1] // 4, 32))(x))
+            h = self.act(
+                nn.GroupNorm(num_groups=max(1, min(x.shape[-1] // 4, 32)))(x)
+            )
 
         if self.up:
             if self.fir:
@@ -342,12 +355,16 @@ class ResnetBlockBigGANpp(nn.Module):
                 init_scale=self.init_scale,
                 skip_rescale=False,
             )(h, class_emb, train=train)
-            h = self.act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
+            h = self.act(
+                nn.GroupNorm(num_groups=max(1, min(h.shape[-1] // 4, 32)))(h)
+            )
         elif conditioning_type == "adagn":
             h = AdaGN(out_ch=out_ch)(h, class_emb)
             h = self.act(h)
         else:
-            h = self.act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
+            h = self.act(
+                nn.GroupNorm(num_groups=max(1, min(h.shape[-1] // 4, 32)))(h)
+            )
         h = nn.Dropout(self.dropout)(h, deterministic=not train)
         h = conv3x3(h, out_ch, init_scale=self.init_scale)
         if C != out_ch or self.up or self.down:

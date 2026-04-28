@@ -44,6 +44,7 @@ class NCSNpp(nn.Module):
         # config parsing
         config = self.config
         act = get_act(config)
+        data_channels = x.shape[-1]
 
         nf = config.model.nf
         ch_mult = config.model.ch_mult
@@ -79,15 +80,17 @@ class NCSNpp(nn.Module):
         combiner = functools.partial(Combine, method=combine_method)
 
         class_emb = None
+        concat_class_map = None
         if class_conditional and class_labels is not None and conditioning_type == "concat":
-            class_map = jax.nn.one_hot(
-                class_labels.astype(jnp.int32), num_classes, dtype=x.dtype
+            concat_class_map = nn.Embed(
+                num_embeddings=num_classes,
+                features=nf,
+                embedding_init=default_initializer(),
+            )(class_labels.astype(jnp.int32))
+            concat_class_map = concat_class_map[:, None, None, :]
+            concat_class_map = jnp.broadcast_to(
+                concat_class_map, (x.shape[0], x.shape[1], x.shape[2], nf)
             )
-            class_map = class_map[:, None, None, :]
-            class_map = jnp.broadcast_to(
-                class_map, (x.shape[0], x.shape[1], x.shape[2], num_classes)
-            )
-            x = jnp.concatenate([x, class_map], axis=-1)
         elif class_conditional and class_labels is not None and conditioning_type in (
             "adagn",
             "cross_attn",
@@ -188,7 +191,12 @@ class NCSNpp(nn.Module):
         if progressive_input != "none":
             input_pyramid = x
 
-        hs = [conv3x3(x, nf)]
+        h0 = conv3x3(x, nf)
+        if concat_class_map is not None:
+            # Concatenate at feature level instead of raw image level so the
+            # pretrained image stem remains reusable during student fine-tuning.
+            h0 = conv1x1(jnp.concatenate([h0, concat_class_map], axis=-1), nf)
+        hs = [h0]
         for i_level in range(num_resolutions):
             # Residual blocks for this resolution
             for i_block in range(num_res_blocks):
@@ -244,8 +252,12 @@ class NCSNpp(nn.Module):
                 if i_level == num_resolutions - 1:
                     if progressive == "output_skip":
                         pyramid = conv3x3(
-                            act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h)),
-                            x.shape[-1],
+                            act(
+                                nn.GroupNorm(
+                                    num_groups=max(1, min(h.shape[-1] // 4, 32))
+                                )(h)
+                            ),
+                            data_channels,
                             bias=True,
                             init_scale=init_scale,
                         )
@@ -261,8 +273,12 @@ class NCSNpp(nn.Module):
                     if progressive == "output_skip":
                         pyramid = pyramid_upsample()(pyramid)
                         pyramid = pyramid + conv3x3(
-                            act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h)),
-                            x.shape[-1],
+                            act(
+                                nn.GroupNorm(
+                                    num_groups=max(1, min(h.shape[-1] // 4, 32))
+                                )(h)
+                            ),
+                            data_channels,
                             bias=True,
                             init_scale=init_scale,
                         )
@@ -287,11 +303,11 @@ class NCSNpp(nn.Module):
         if progressive == "output_skip" and not config.model.double_heads:
             h = pyramid
         else:
-            h = act(nn.GroupNorm(num_groups=min(h.shape[-1] // 4, 32))(h))
+            h = act(nn.GroupNorm(num_groups=max(1, min(h.shape[-1] // 4, 32)))(h))
             if config.model.double_heads:
-                h = conv3x3(h, x.shape[-1] * 2, init_scale=init_scale)
+                h = conv3x3(h, data_channels * 2, init_scale=init_scale)
             else:
-                h = conv3x3(h, x.shape[-1], init_scale=init_scale)
+                h = conv3x3(h, data_channels, init_scale=init_scale)
 
         return h
 

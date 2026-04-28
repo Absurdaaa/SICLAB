@@ -3,70 +3,74 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Teacher-free conditional fine-tuning for a CD student.
-# This script runs three variants:
-#   1. true AdaGN conditioning
-#   2. concatenation conditioning
-#   3. cross-attention conditioning
-# If the legacy WORKDIR override is set, treat it as the root directory and
-# place each variant under a separate subdirectory to preserve compatibility.
-resolve_workdir() {
-  local specific="$1"
-  local suffix="$2"
-  local fallback="$3"
+# Remote-friendly launcher for conditional student fine-tuning.
+#
+# What it does:
+# 1. Fine-tunes an existing unconditional student checkpoint with DSM loss.
+# 2. Runs three conditioning variants: adagn / concat / cross_attn.
+# 3. Performs small-scale conditional sampling after training.
+# 4. Optionally runs classifier-based conditional evaluation if CLASSIFIER_CKPT is set.
+#
+# Minimal usage:
+#   INIT_CKPT=/path/to/student/checkpoint_XX \
+#   WORKDIR_ROOT=/path/to/outputs \
+#   bash run_student_conditional_ft_remote.sh
 
-  if [[ -n "${specific}" ]]; then
-    printf '%s\n' "${specific}"
-  elif [[ -n "${WORKDIR:-}" ]]; then
-    printf '%s/%s\n' "${WORKDIR}" "${suffix}"
-  else
-    printf '%s\n' "${fallback}"
-  fi
-}
-
-WORKDIR_ADAGN="$(resolve_workdir "${WORKDIR_ADAGN:-}" "adagn" "/nfs/tangwenhao/lhp/cd-conditional-student-ft-adagn-true")"
-WORKDIR_CONCAT="$(resolve_workdir "${WORKDIR_CONCAT:-}" "concat" "/nfs/tangwenhao/lhp/cd-conditional-student-ft-concat")"
-WORKDIR_CROSS="$(resolve_workdir "${WORKDIR_CROSS:-}" "cross-attn" "/nfs/tangwenhao/lhp/cd-conditional-student-ft-cross-attn")"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 CONFIG="${CONFIG:-configs/cifar10_student_conditional_ft.py}"
-INIT_CKPT="${INIT_CKPT:-/nfs/tangwenhao/lhp/cd-lpips/checkpoints/checkpoint_25}"
-GPUS="${GPUS:-0,1,2,3}"
-BATCH_SIZE="${BATCH_SIZE:-128}"
+INIT_CKPT="${INIT_CKPT:-}"
+WORKDIR_ROOT="${WORKDIR_ROOT:-${SCRIPT_DIR}/outputs/conditional_student_ft}"
+GPUS="${GPUS:-0}"
+
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 LR="${LR:-1e-5}"
-N_ITERS="${N_ITERS:-20000}"
+N_ITERS="${N_ITERS:-2000}"
 LOG_FREQ="${LOG_FREQ:-50}"
-EVAL_FREQ="${EVAL_FREQ:-500}"
-SNAPSHOT_FREQ="${SNAPSHOT_FREQ:-2000}"
+EVAL_FREQ="${EVAL_FREQ:-200}"
+SNAPSHOT_FREQ="${SNAPSHOT_FREQ:-1000}"
+
 SAMPLE_CKPT="${SAMPLE_CKPT:-latest}"
-NUM_SAMPLES="${NUM_SAMPLES:-5000}"
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-256}"
-SAVE_META_EVERY="${SAVE_META_EVERY:-8}"
+NUM_SAMPLES="${NUM_SAMPLES:-200}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-100}"
+SAVE_META_EVERY="${SAVE_META_EVERY:-2}"
+
 CLASSIFIER_CKPT="${CLASSIFIER_CKPT:-}"
 DATA_ROOT="${DATA_ROOT:-./data}"
 EVAL_DEVICE="${EVAL_DEVICE:-cuda:0}"
-CLASSIFIER_BATCH_SIZE="${CLASSIFIER_BATCH_SIZE:-256}"
+CLASSIFIER_BATCH_SIZE="${CLASSIFIER_BATCH_SIZE:-128}"
 FID_BATCH_SIZE="${FID_BATCH_SIZE:-64}"
 GRID_SIZE="${GRID_SIZE:-8}"
 STATS_CACHE="${STATS_CACHE:-}"
+
+if [[ -z "${INIT_CKPT}" ]]; then
+  echo "INIT_CKPT is required, e.g. /path/to/checkpoints/checkpoint_25" >&2
+  exit 1
+fi
+
+mkdir -p "${WORKDIR_ROOT}"
 
 run_train() {
   local workdir="$1"
   local conditioning_type="$2"
 
-  CUDA_VISIBLE_DEVICES="${GPUS}" python -m jcm.main \
-  --config "${CONFIG}" \
-  --workdir "${workdir}" \
-  --mode train \
-  --config.training.init_ckpt="${INIT_CKPT}" \
-  --config.training.batch_size="${BATCH_SIZE}" \
-  --config.optim.lr="${LR}" \
-  --config.training.n_iters="${N_ITERS}" \
-  --config.training.log_freq="${LOG_FREQ}" \
-  --config.training.eval_freq="${EVAL_FREQ}" \
-  --config.training.snapshot_freq="${SNAPSHOT_FREQ}" \
-  --config.training.snapshot_freq_for_preemption="${SNAPSHOT_FREQ}" \
-  --config.model.class_conditional=True \
-  --config.model.conditioning_type="${conditioning_type}" \
-  --config.model.num_classes=10
+  mkdir -p "${workdir}"
+  echo "[train] ${conditioning_type} -> ${workdir}"
+
+  CUDA_VISIBLE_DEVICES="${GPUS}" "${PYTHON_BIN}" -m jcm.main \
+    --config "${CONFIG}" \
+    --workdir "${workdir}" \
+    --mode train \
+    --config.training.init_ckpt="${INIT_CKPT}" \
+    --config.training.batch_size="${TRAIN_BATCH_SIZE}" \
+    --config.optim.lr="${LR}" \
+    --config.training.n_iters="${N_ITERS}" \
+    --config.training.log_freq="${LOG_FREQ}" \
+    --config.training.eval_freq="${EVAL_FREQ}" \
+    --config.training.snapshot_freq="${SNAPSHOT_FREQ}" \
+    --config.training.snapshot_freq_for_preemption="${SNAPSHOT_FREQ}" \
+    --config.model.class_conditional=True \
+    --config.model.conditioning_type="${conditioning_type}" \
+    --config.model.num_classes=10
 }
 
 resolve_sampling_ckpt() {
@@ -99,6 +103,7 @@ run_sampling_and_eval() {
   local samples_root="${workdir}/conditional_samples_ckpt_${sample_ckpt}"
   local metrics_root="${workdir}/conditional_metrics_ckpt_${sample_ckpt}"
 
+  echo "[sample] ${conditioning_type} ckpt=${sample_ckpt}"
   WORKDIR="${workdir}" \
   OUTPUT_ROOT="${samples_root}" \
   CONFIG="${CONFIG}" \
@@ -111,12 +116,13 @@ run_sampling_and_eval() {
   bash "${SCRIPT_DIR}/run_conditional_sampling.sh"
 
   if [[ -z "${CLASSIFIER_CKPT}" ]]; then
-    echo "Skipping conditional evaluation for ${conditioning_type}: CLASSIFIER_CKPT is not set."
+    echo "[eval] skip ${conditioning_type}: CLASSIFIER_CKPT is not set"
     return
   fi
 
   local stats_cache_dir="${STATS_CACHE:-${metrics_root}/real_stats_cache}"
-  python "${SCRIPT_DIR}/scripts/evaluate_conditional_generation.py" \
+  echo "[eval] ${conditioning_type}"
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/evaluate_conditional_generation.py" \
     --samples-root "${samples_root}" \
     --classifier-ckpt "${CLASSIFIER_CKPT}" \
     --output-dir "${metrics_root}" \
@@ -129,15 +135,19 @@ run_sampling_and_eval() {
 }
 
 declare -a TRAIN_JOBS=(
-  "${WORKDIR_CROSS}:cross_attn"
-  "${WORKDIR_ADAGN}:adagn"
-  "${WORKDIR_CONCAT}:concat"
+  "adagn:adagn"
+  "concat:concat"
+  "cross_attn:cross_attn"
 )
 
 for job in "${TRAIN_JOBS[@]}"; do
-  workdir="${job%%:*}"
+  name="${job%%:*}"
   conditioning_type="${job#*:}"
+  workdir="${WORKDIR_ROOT}/${name}"
+
   run_train "${workdir}" "${conditioning_type}"
   sample_ckpt="$(resolve_sampling_ckpt "${workdir}")"
   run_sampling_and_eval "${workdir}" "${conditioning_type}" "${sample_ckpt}"
 done
+
+echo "All runs finished under ${WORKDIR_ROOT}"
