@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import haiku as hk
 import jax.random as random
+from flax import traverse_util
 
 from . import checkpoints
 from .models import utils as mutils
@@ -30,6 +31,53 @@ import numpy as np
 
 def _get_class_labels(batch):
     return batch["label"] if "label" in batch else None
+
+
+def get_trainable_filter_fns(config, params):
+    mode = str(getattr(config.training, "finetune_mode", "full")).lower()
+    if mode == "full":
+        return None, None
+    if mode not in ("conditional_only", "conditional_plus_head"):
+        raise ValueError(f"Unknown finetune_mode: {config.training.finetune_mode}")
+
+    if not bool(getattr(config.model, "class_conditional", False)):
+        raise ValueError(f"{mode} finetuning requires class_conditional=True")
+
+    conditioning_type = str(getattr(config.model, "conditioning_type", "adagn")).lower()
+    if conditioning_type == "adagn":
+        trainable_markers = ("class_embed", "cond_proj")
+    elif conditioning_type == "concat":
+        trainable_markers = ("class_embed", "concat_condition_proj")
+    elif conditioning_type == "cross_attn":
+        trainable_markers = ("class_embed", "cross_attn")
+    else:
+        raise ValueError(f"Unsupported conditioning_type: {conditioning_type}")
+
+    if mode == "conditional_plus_head":
+        trainable_markers = trainable_markers + ("output_head",)
+
+    flat_params = traverse_util.flatten_dict(params)
+    flat_mask = {}
+    trainable_leaves = 0
+    for path, value in flat_params.items():
+        path_str = "/".join(path)
+        trainable = any(marker in path_str for marker in trainable_markers)
+        if trainable:
+            trainable_leaves += 1
+        flat_mask[path] = jnp.asarray(1.0 if trainable else 0.0, dtype=value.dtype)
+
+    if trainable_leaves == 0:
+        raise ValueError(
+            "conditional_only finetuning selected no parameters. "
+            f"conditioning_type={conditioning_type}"
+        )
+
+    grad_mask = traverse_util.unflatten_dict(flat_mask)
+
+    def _apply_mask(tree):
+        return jax.tree_util.tree_map(lambda x, m: x * m, tree, grad_mask)
+
+    return _apply_mask, _apply_mask
 
 
 def get_optimizer(config):
@@ -89,8 +137,10 @@ def get_optimizer(config):
             f"Optimizer {config.optim.optimizer} not supported yet!"
         )
 
-    def optimize_fn(grads, opt_state, params):
+    def optimize_fn(grads, opt_state, params, update_filter_fn=None):
         updates, opt_state = optimizer.update(grads, opt_state, params)
+        if update_filter_fn is not None:
+            updates = update_filter_fn(updates)
         params = optax.apply_updates(params, updates)
         return params, opt_state
 
@@ -995,6 +1045,8 @@ def get_step_fn(
     train,
     optimize_fn=None,
     ema_scales_fn=None,
+    grad_filter_fn=None,
+    update_filter_fn=None,
 ):
     """Create a one-step training/evaluation function.
 
@@ -1040,7 +1092,11 @@ def get_step_fn(
                 ), grad = grad_fn(step_rng, params, states, batch)
 
                 grad = jax.lax.pmean(grad, axis_name="batch")
-                new_params, new_opt_state = optimize_fn(grad, opt_state, params)
+                if grad_filter_fn is not None:
+                    grad = grad_filter_fn(grad)
+                new_params, new_opt_state = optimize_fn(
+                    grad, opt_state, params, update_filter_fn=update_filter_fn
+                )
                 new_params_ema = jax.tree_util.tree_map(
                     lambda p_ema, p: p_ema * state.ema_rate
                     + p * (1.0 - state.ema_rate),
@@ -1061,7 +1117,11 @@ def get_step_fn(
                     step_rng, params, states, batch, target_params, num_scales
                 )
                 grad = jax.lax.pmean(grad, axis_name="batch")
-                new_params, new_opt_state = optimize_fn(grad, opt_state, params)
+                if grad_filter_fn is not None:
+                    grad = grad_filter_fn(grad)
+                new_params, new_opt_state = optimize_fn(
+                    grad, opt_state, params, update_filter_fn=update_filter_fn
+                )
                 new_params_ema = jax.tree_util.tree_map(
                     lambda p_ema, p: p_ema * state.ema_rate
                     + p * (1.0 - state.ema_rate),

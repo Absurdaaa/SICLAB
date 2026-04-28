@@ -85,6 +85,7 @@ class NCSNpp(nn.Module):
             concat_class_map = nn.Embed(
                 num_embeddings=num_classes,
                 features=nf,
+                name="class_embed",
                 embedding_init=default_initializer(),
             )(class_labels.astype(jnp.int32))
             concat_class_map = concat_class_map[:, None, None, :]
@@ -98,6 +99,7 @@ class NCSNpp(nn.Module):
             class_emb = nn.Embed(
                 num_embeddings=num_classes,
                 features=nf * 4,
+                name="class_embed",
                 embedding_init=default_initializer(),
             )(class_labels.astype(jnp.int32))
 
@@ -195,7 +197,16 @@ class NCSNpp(nn.Module):
         if concat_class_map is not None:
             # Concatenate at feature level instead of raw image level so the
             # pretrained image stem remains reusable during student fine-tuning.
-            h0 = conv1x1(jnp.concatenate([h0, concat_class_map], axis=-1), nf)
+            h0 = nn.Conv(
+                nf,
+                kernel_size=(1, 1),
+                strides=(1, 1),
+                padding="SAME",
+                use_bias=True,
+                kernel_init=default_initializer(),
+                bias_init=nn.initializers.zeros,
+                name="concat_condition_proj",
+            )(jnp.concatenate([h0, concat_class_map], axis=-1))
         hs = [h0]
         for i_level in range(num_resolutions):
             # Residual blocks for this resolution
@@ -260,6 +271,7 @@ class NCSNpp(nn.Module):
                             data_channels,
                             bias=True,
                             init_scale=init_scale,
+                            name="output_head",
                         )
                     elif progressive == "residual":
                         pyramid = conv3x3(
@@ -281,6 +293,7 @@ class NCSNpp(nn.Module):
                             data_channels,
                             bias=True,
                             init_scale=init_scale,
+                            name="output_head",
                         )
                     elif progressive == "residual":
                         pyramid = pyramid_upsample(out_ch=h.shape[-1])(pyramid)
@@ -305,9 +318,27 @@ class NCSNpp(nn.Module):
         else:
             h = act(nn.GroupNorm(num_groups=max(1, min(h.shape[-1] // 4, 32)))(h))
             if config.model.double_heads:
-                h = conv3x3(h, data_channels * 2, init_scale=init_scale)
+                h = nn.Conv(
+                    data_channels * 2,
+                    kernel_size=(3, 3),
+                    strides=(1, 1),
+                    padding="SAME",
+                    use_bias=True,
+                    kernel_init=default_initializer(init_scale),
+                    bias_init=nn.initializers.zeros,
+                    name="output_head",
+                )(h)
             else:
-                h = conv3x3(h, data_channels, init_scale=init_scale)
+                h = nn.Conv(
+                    data_channels,
+                    kernel_size=(3, 3),
+                    strides=(1, 1),
+                    padding="SAME",
+                    use_bias=True,
+                    kernel_init=default_initializer(init_scale),
+                    bias_init=nn.initializers.zeros,
+                    name="output_head",
+                )(h)
 
         return h
 

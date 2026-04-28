@@ -41,6 +41,7 @@ CLASSIFIER_BATCH_SIZE="${CLASSIFIER_BATCH_SIZE:-128}"
 FID_BATCH_SIZE="${FID_BATCH_SIZE:-64}"
 GRID_SIZE="${GRID_SIZE:-8}"
 STATS_CACHE="${STATS_CACHE:-}"
+FINETUNE_MODE="${FINETUNE_MODE:-full}"
 
 if [[ -z "${INIT_CKPT}" ]]; then
   echo "INIT_CKPT is required, e.g. /path/to/checkpoints/checkpoint_25" >&2
@@ -68,6 +69,7 @@ run_train() {
     --config.training.eval_freq="${EVAL_FREQ}" \
     --config.training.snapshot_freq="${SNAPSHOT_FREQ}" \
     --config.training.snapshot_freq_for_preemption="${SNAPSHOT_FREQ}" \
+    --config.training.finetune_mode="${FINETUNE_MODE}" \
     --config.model.class_conditional=True \
     --config.model.conditioning_type="${conditioning_type}" \
     --config.model.num_classes=10

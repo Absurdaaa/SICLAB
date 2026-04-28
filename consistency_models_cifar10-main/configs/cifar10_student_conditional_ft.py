@@ -13,5 +13,7 @@ def get_config():
     config.training.finetune = False
     config.training.snapshot_sampling = False
     config.training.ref_model_path = ""
+    config.training.likelihood_weighting = False
+    config.training.n_jitted_steps = 1
 
     return config

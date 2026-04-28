@@ -126,12 +126,17 @@ def train(config, workdir):
     )
 
     ema_scale_fn = losses.get_ema_scales_fn(config)
+    grad_filter_fn, update_filter_fn = losses.get_trainable_filter_fns(
+        config, state.params
+    )
 
     train_step_fn = losses.get_step_fn(
         train_loss_fn,
         train=True,
         optimize_fn=optimize_fn,
         ema_scales_fn=ema_scale_fn,
+        grad_filter_fn=grad_filter_fn,
+        update_filter_fn=update_filter_fn,
     )
     # Pmap (and jit-compile) multiple training steps together for faster running
     p_train_step = jax.pmap(
@@ -298,6 +303,8 @@ def train(config, workdir):
                         train=True,
                         optimize_fn=optimize_fn,
                         ema_scales_fn=ema_scale_fn,
+                        grad_filter_fn=grad_filter_fn,
+                        update_filter_fn=update_filter_fn,
                     )
                     # Pmap (and jit-compile) multiple training steps together for faster running
                     p_train_step = jax.pmap(

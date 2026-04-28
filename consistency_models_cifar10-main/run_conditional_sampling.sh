@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Batch conditional sampling for CIFAR-10 classes.
-# This creates:
-#   ${OUTPUT_ROOT}/class_0
-#   ...
-#   ${OUTPUT_ROOT}/class_9
-# Each class directory contains the eval shards produced by jcm.main --mode eval.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Batch conditional sampling for CIFAR-10 classes in a single Python process.
+# This avoids reloading the model/checkpoint once per class.
 
 WORKDIR="${WORKDIR:-/nfs/tangwenhao/lhp/cd-conditional-student-ft}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/nfs/tangwenhao/lhp/conditional_samples}"
@@ -20,32 +18,13 @@ SAVE_META_EVERY="${SAVE_META_EVERY:-8}"
 
 mkdir -p "${OUTPUT_ROOT}"
 
-for CLASS_ID in 0 1 2 3 4 5 6 7 8 9; do
-  CLASS_DIR="${OUTPUT_ROOT}/class_${CLASS_ID}"
-  mkdir -p "${CLASS_DIR}"
-  echo "Sampling class ${CLASS_ID} -> ${CLASS_DIR}"
-
-  CUDA_VISIBLE_DEVICES="${GPUS}" python -m jcm.main \
-    --config "${CONFIG}" \
-    --workdir "${WORKDIR}" \
-    --mode eval \
-    --eval_folder "class_${CLASS_ID}" \
-    --config.eval.begin_ckpt="${CKPT}" \
-    --config.eval.end_ckpt="${CKPT}" \
-    --config.eval.num_samples="${NUM_SAMPLES}" \
-    --config.eval.batch_size="${EVAL_BATCH_SIZE}" \
-    --config.eval.enable_loss=False \
-    --config.eval.enable_bpd=False \
-    --config.eval.enable_sampling=True \
-    --config.eval.save_meta_every="${SAVE_META_EVERY}" \
-    --config.eval.aggregate_samples=False \
-    --config.model.class_conditional=True \
-    --config.model.conditioning_type="${CONDITIONING_TYPE}" \
-    --config.model.num_classes=10 \
-    --config.sampling.class_label="${CLASS_ID}"
-
-  rm -rf "${CLASS_DIR}"
-  cp -r "${WORKDIR}/class_${CLASS_ID}" "${CLASS_DIR}"
-done
+CUDA_VISIBLE_DEVICES="${GPUS}" python "${SCRIPT_DIR}/scripts/sample_conditional_all_classes.py" \
+  --config "${CONFIG}" \
+  --workdir "${WORKDIR}" \
+  --output-root "${OUTPUT_ROOT}" \
+  --ckpt "${CKPT}" \
+  --conditioning-type "${CONDITIONING_TYPE}" \
+  --num-samples "${NUM_SAMPLES}" \
+  --batch-size "${EVAL_BATCH_SIZE}"
 
 echo "Done. Conditional samples saved under ${OUTPUT_ROOT}"

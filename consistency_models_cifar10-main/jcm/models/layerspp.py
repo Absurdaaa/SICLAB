@@ -81,6 +81,7 @@ class AdaGN(nn.Module):
 
         scale_shift = nn.Dense(
             2 * self.out_ch,
+            name="cond_proj",
             kernel_init=nn.initializers.zeros,
         )(nn.swish(cond))
         scale, shift = jnp.split(scale_shift, 2, axis=-1)
@@ -268,6 +269,7 @@ class ResnetBlockDDPMpp(nn.Module):
                 num_tokens=self.num_tokens,
                 init_scale=self.init_scale,
                 skip_rescale=False,
+                name="cross_attn",
             )(h, class_emb, train=train)
             h = self.act(
                 nn.GroupNorm(num_groups=max(1, min(h.shape[-1] // 4, 32)))(h)
@@ -354,6 +356,7 @@ class ResnetBlockBigGANpp(nn.Module):
                 num_tokens=self.num_tokens,
                 init_scale=self.init_scale,
                 skip_rescale=False,
+                name="cross_attn",
             )(h, class_emb, train=train)
             h = self.act(
                 nn.GroupNorm(num_groups=max(1, min(h.shape[-1] // 4, 32)))(h)

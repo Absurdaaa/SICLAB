@@ -349,6 +349,7 @@ def evaluate(config, workdir, eval_folder="eval"):
                 round_t0 = time.perf_counter()
                 samples, n = sampling_fn(sample_rng, pstate)
                 samples = jax.tree_util.tree_map(lambda x: x.block_until_ready(), samples)
+                num_eval_steps = int(np.asarray(jax.device_get(n)).reshape(-1)[0])
                 round_elapsed = time.perf_counter() - round_t0
                 round_num_samples = int(np.prod(samples.shape[:-3]))
                 if enable_speed and round_elapsed > 0:
@@ -362,7 +363,7 @@ def evaluate(config, workdir, eval_folder="eval"):
                         round_speed,
                         round_elapsed,
                         round_num_samples,
-                        int(n),
+                        num_eval_steps,
                     )
                 samples = (samples + 1.0) / 2.0
                 samples = np.clip(samples * 255.0, 0, 255).astype(np.uint8)

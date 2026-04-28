@@ -17,6 +17,10 @@ def get_default_configs():
     training.likelihood_weighting = False
     training.n_jitted_steps = 5  # TODO: important flag!
     training.init_ckpt = ""
+    # "full": fine-tune the whole model
+    # "conditional_only": only train conditioning modules
+    # "conditional_plus_head": conditioning modules + output head
+    training.finetune_mode = "full"
 
     # sampling
     config.sampling = sampling = ml_collections.ConfigDict()
@@ -24,7 +28,9 @@ def get_default_configs():
     sampling.noise_removal = True
     sampling.probability_flow = False
     sampling.snr = 0.16
-    sampling.class_label = None
+    # Keep this as a string so ml_collections command-line overrides can switch
+    # between "none", "random", or a concrete class id like "3".
+    sampling.class_label = "none"
 
     # evaluation
     config.eval = evaluate = ml_collections.ConfigDict()

@@ -45,6 +45,13 @@ def _get_class_labels(config, rng, batch_size):
     class_label = getattr(config.sampling, "class_label", None)
     if class_label is None:
         return None
+    if isinstance(class_label, str):
+        lowered = class_label.lower()
+        if lowered == "none":
+            return None
+        if lowered == "random":
+            num_classes = int(getattr(config.model, "num_classes", 10))
+            return random.randint(rng, (batch_size,), 0, num_classes)
     if class_label == "random":
         num_classes = int(getattr(config.model, "num_classes", 10))
         return random.randint(rng, (batch_size,), 0, num_classes)
