@@ -100,8 +100,17 @@ def save_checkpoint(ckpt_dir, target, step, prefix="checkpoint_", keep=1):
     logging.info("Saved checkpoint at %s", ckpt_path)
 
     # Remove old checkpoint files.
-    base_path = os.path.join(ckpt_dir, f"{prefix}")
-    checkpoint_files = natural_sort(blobfile.glob(base_path + "*"))
+    if os.path.isdir(ckpt_dir):
+        checkpoint_files = natural_sort(
+            [
+                os.path.join(ckpt_dir, name)
+                for name in os.listdir(ckpt_dir)
+                if name.startswith(prefix)
+            ]
+        )
+    else:
+        base_path = os.path.join(ckpt_dir, f"{prefix}")
+        checkpoint_files = natural_sort(blobfile.glob(base_path + "*"))
     if len(checkpoint_files) > keep:
         old_ckpts = checkpoint_files[:-keep]
         for path in old_ckpts:
@@ -121,8 +130,17 @@ def latest_checkpoint(ckpt_dir, prefix="checkpoint_"):
     Returns:
       The latest checkpoint path or None if no checkpoints were found.
     """
-    glob_path = os.path.join(ckpt_dir, f"{prefix}*")
-    checkpoint_files = natural_sort(blobfile.glob(glob_path))
+    if os.path.isdir(ckpt_dir):
+        checkpoint_files = natural_sort(
+            [
+                os.path.join(ckpt_dir, name)
+                for name in os.listdir(ckpt_dir)
+                if name.startswith(prefix)
+            ]
+        )
+    else:
+        glob_path = os.path.join(ckpt_dir, f"{prefix}*")
+        checkpoint_files = natural_sort(blobfile.glob(glob_path))
     ckpt_tmp_path = _checkpoint_path(ckpt_dir, "tmp", prefix)
     checkpoint_files = [f for f in checkpoint_files if f != ckpt_tmp_path]
     if checkpoint_files:

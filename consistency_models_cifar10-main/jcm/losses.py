@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import haiku as hk
 import jax.random as random
+import flax
 from flax import traverse_util
 
 from . import checkpoints
@@ -72,7 +73,7 @@ def get_trainable_filter_fns(config, params):
             f"conditioning_type={conditioning_type}"
         )
 
-    grad_mask = traverse_util.unflatten_dict(flat_mask)
+    grad_mask = flax.core.freeze(traverse_util.unflatten_dict(flat_mask))
 
     def _apply_mask(tree):
         return jax.tree_util.tree_map(lambda x, m: x * m, tree, grad_mask)

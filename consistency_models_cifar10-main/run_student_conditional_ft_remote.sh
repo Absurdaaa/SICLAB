@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+export WANDB_MODE=offline
+
 # Remote-friendly launcher for conditional student fine-tuning.
 #
 # What it does:
@@ -18,30 +20,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 CONFIG="${CONFIG:-configs/cifar10_student_conditional_ft.py}"
-INIT_CKPT="${INIT_CKPT:-}"
-WORKDIR_ROOT="${WORKDIR_ROOT:-${SCRIPT_DIR}/outputs/conditional_student_ft}"
-GPUS="${GPUS:-0}"
+INIT_CKPT="${INIT_CKPT:-/nfs/tangwenhao/lhp/cd-lpips/checkpoints-meta/checkpoint_25}"
+WORKDIR_ROOT="${WORKDIR_ROOT:-/nfs/tangwenhao/lhp/conditional_student_ft_plus_head}"
+GPUS="${GPUS:-0,1,2,3}"
 
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
-LR="${LR:-1e-5}"
-N_ITERS="${N_ITERS:-2000}"
-LOG_FREQ="${LOG_FREQ:-50}"
-EVAL_FREQ="${EVAL_FREQ:-200}"
-SNAPSHOT_FREQ="${SNAPSHOT_FREQ:-1000}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-168}"
+LR="${LR:-3e-5}"
+N_ITERS="${N_ITERS:-20000}"
+LOG_FREQ="${LOG_FREQ:-100}"
+EVAL_FREQ="${EVAL_FREQ:-1000}"
+SNAPSHOT_FREQ="${SNAPSHOT_FREQ:-2000}"
 
 SAMPLE_CKPT="${SAMPLE_CKPT:-latest}"
-NUM_SAMPLES="${NUM_SAMPLES:-200}"
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-100}"
+NUM_SAMPLES="${NUM_SAMPLES:-5000}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
 SAVE_META_EVERY="${SAVE_META_EVERY:-2}"
 
-CLASSIFIER_CKPT="${CLASSIFIER_CKPT:-}"
+CLASSIFIER_CKPT="${CLASSIFIER_CKPT:-/nfs/tangwenhao/lhp/cifar10_classifier/best_classifier.pt}"
 DATA_ROOT="${DATA_ROOT:-./data}"
 EVAL_DEVICE="${EVAL_DEVICE:-cuda:0}"
 CLASSIFIER_BATCH_SIZE="${CLASSIFIER_BATCH_SIZE:-128}"
 FID_BATCH_SIZE="${FID_BATCH_SIZE:-64}"
 GRID_SIZE="${GRID_SIZE:-8}"
 STATS_CACHE="${STATS_CACHE:-}"
-FINETUNE_MODE="${FINETUNE_MODE:-full}"
+FINETUNE_MODE="${FINETUNE_MODE:-conditional_plus_head}"
 
 if [[ -z "${INIT_CKPT}" ]]; then
   echo "INIT_CKPT is required, e.g. /path/to/checkpoints/checkpoint_25" >&2
