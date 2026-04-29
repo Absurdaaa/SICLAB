@@ -26,6 +26,37 @@ from jcm.models import ddpm, ncsnv2, ncsnpp  # noqa: F401
 from jcm.models import utils as mutils
 
 
+def _log(msg):
+    print(msg, flush=True)
+
+
+def _merge_compatible_tree(new_tree, old_tree):
+    if isinstance(new_tree, dict) and isinstance(old_tree, dict):
+        merged = dict(new_tree)
+        for key, value in new_tree.items():
+            if key in old_tree:
+                merged[key] = _merge_compatible_tree(value, old_tree[key])
+        return merged
+
+    new_shape = getattr(new_tree, "shape", None)
+    old_shape = getattr(old_tree, "shape", None)
+    if new_shape is not None and old_shape is not None and new_shape == old_shape:
+        return old_tree
+    return new_tree
+
+
+def _restore_state_compatibly(state, ckpt_path_or_dir, ckpt_step):
+    raw_state = checkpoints.restore_checkpoint(ckpt_path_or_dir, None, step=ckpt_step)
+    if raw_state is None:
+        raise ValueError(f"Checkpoint not found: {ckpt_path_or_dir}, step={ckpt_step}")
+
+    state_dict = flax.serialization.to_state_dict(state)
+    for field in ("params", "params_ema", "target_params", "model_state", "step"):
+        if field in raw_state and field in state_dict:
+            state_dict[field] = _merge_compatible_tree(state_dict[field], raw_state[field])
+    return flax.serialization.from_state_dict(state, state_dict)
+
+
 def _load_config(config_path):
     if not os.path.isabs(config_path):
         config_path = os.path.join(PROJECT_ROOT, config_path)
@@ -66,7 +97,7 @@ def _build_state(config, ckpt_path_or_dir, ckpt_step):
             rng_state=rng.internal_state,
         )
 
-    state = checkpoints.restore_checkpoint(ckpt_path_or_dir, state, step=ckpt_step)
+    state = _restore_state_compatibly(state, ckpt_path_or_dir, ckpt_step)
     return model, state
 
 
@@ -116,6 +147,10 @@ def main():
         )
 
     ckpt_source = os.path.join(args.workdir, "checkpoints")
+    _log(
+        f"[{args.name}] building state "
+        f"(config={args.config}, ckpt={args.ckpt}, batch_size={config.eval.batch_size})"
+    )
     model, state = _build_state(config, ckpt_source, args.ckpt)
     sde = sde_lib.get_sde(config)
     sampling_shape = (
@@ -132,14 +167,18 @@ def main():
 
     total_samples_per_iter = config.eval.batch_size
 
+    _log(f"[{args.name}] starting warmup ({args.warmup_iters} iters)")
     for _ in range(args.warmup_iters):
         sample_rng = jnp.asarray(rng.take(jax.local_device_count()))
         samples, n = sampling_fn(sample_rng, pstate)
         jax.tree_util.tree_map(lambda x: x.block_until_ready(), samples)
         _ = _to_scalar_int(n)
+        if args.warmup_iters <= 10 or (_ + 1) % max(1, args.warmup_iters // 5) == 0:
+            _log(f"[{args.name}] warmup {_ + 1}/{args.warmup_iters} done")
 
     timings = []
     eval_steps = None
+    _log(f"[{args.name}] starting timed runs ({args.timed_iters} iters)")
     for _ in range(args.timed_iters):
         sample_rng = jnp.asarray(rng.take(jax.local_device_count()))
         t0 = time.perf_counter()
@@ -148,6 +187,8 @@ def main():
         elapsed = time.perf_counter() - t0
         timings.append(elapsed)
         eval_steps = _to_scalar_int(n)
+        if args.timed_iters <= 20 or (_ + 1) % max(1, args.timed_iters // 10) == 0:
+            _log(f"[{args.name}] timed {_ + 1}/{args.timed_iters} done")
 
     mean_sec_per_iter = float(np.mean(timings))
     std_sec_per_iter = float(np.std(timings))
@@ -172,6 +213,7 @@ def main():
         "sec_per_eval_step": sec_per_eval_step,
     }
 
+    _log(f"[{args.name}] finished")
     print(json.dumps(result, indent=2, sort_keys=True))
     if args.output_json:
         with open(args.output_json, "w", encoding="utf-8") as fout:

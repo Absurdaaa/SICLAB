@@ -27,6 +27,33 @@ from jcm.models import ddpm, ncsnv2, ncsnpp  # noqa: F401
 from jcm.models import utils as mutils
 
 
+def _merge_compatible_tree(new_tree, old_tree):
+    if isinstance(new_tree, dict) and isinstance(old_tree, dict):
+        merged = dict(new_tree)
+        for key, value in new_tree.items():
+            if key in old_tree:
+                merged[key] = _merge_compatible_tree(value, old_tree[key])
+        return merged
+
+    new_shape = getattr(new_tree, "shape", None)
+    old_shape = getattr(old_tree, "shape", None)
+    if new_shape is not None and old_shape is not None and new_shape == old_shape:
+        return old_tree
+    return new_tree
+
+
+def _restore_state_compatibly(state, checkpoint_dir, ckpt):
+    raw_state = checkpoints.restore_checkpoint(checkpoint_dir, None, step=ckpt)
+    if raw_state is None:
+        raise ValueError(f"Checkpoint not found: {checkpoint_dir}, step={ckpt}")
+
+    state_dict = flax.serialization.to_state_dict(state)
+    for field in ("params", "params_ema", "target_params", "model_state", "step"):
+        if field in raw_state and field in state_dict:
+            state_dict[field] = _merge_compatible_tree(state_dict[field], raw_state[field])
+    return flax.serialization.from_state_dict(state, state_dict)
+
+
 def _load_config(config_path):
     if not os.path.isabs(config_path):
         config_path = os.path.join(PROJECT_ROOT, config_path)
@@ -67,7 +94,7 @@ def _restore_state(config, workdir, ckpt):
         )
 
     checkpoint_dir = os.path.join(workdir, "checkpoints")
-    state = checkpoints.restore_checkpoint(checkpoint_dir, state, step=ckpt)
+    state = _restore_state_compatibly(state, checkpoint_dir, ckpt)
     return model, state
 
 
